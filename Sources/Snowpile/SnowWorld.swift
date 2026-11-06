@@ -14,7 +14,8 @@ struct Sprite {
 /// The whole snowfall in global Cocoa coordinates (points, origin at the bottom left of the main screen).
 /// Drifts are height maps: one column every `columnWidth` points along the top edge of a window, the Dock or a screen's floor.
 final class SnowWorld {
-    enum Kind { case window, dock, ground }
+    /// `element` is a text field or a similar box inside a window, which moves and hides with its window.
+    enum Kind { case window, element, dock, ground }
 
     final class Surface {
         let key: Int
@@ -25,6 +26,8 @@ final class SnowWorld {
         let cap: Float
         /// Position in the window stack, 0 being the frontmost window.
         var z: Int
+        /// The window an element lies in.
+        var owner: Int?
         var spillLeft: Float = 0
         var spillRight: Float = 0
         var snowmen: [Snowman] = []
@@ -58,6 +61,8 @@ final class SnowWorld {
         var push: SIMD2<Float> = .zero
         /// Far, faint flakes fall past everything; only nearer ones settle.
         var lands: Bool
+        /// Falls in front of windows rather than onto their top edges, so it can settle on what is inside them.
+        var front: Bool
         var screen: Int
     }
 
@@ -75,6 +80,9 @@ final class SnowWorld {
     private static let groundCap: Float = 30
     private static let carrySpeed: Float = 600
     private static let cornerInset: Float = 10
+    private static let elementInset: Float = 4
+    /// Share of the settling flakes that fall in front of windows.
+    private static let frontShare: Float = 0.35
     private static let pointerReach: Float = 80
     private static let broomReach: Float = 12
 
@@ -93,7 +101,7 @@ final class SnowWorld {
     /// How readily a strong wind picks settled snow back up (drifting and blowing snow), 0 to 1.
     var lift: Float = 0
     var flakeScale: Float = 1
-    var settles: Set<Kind> = [.window, .dock, .ground]
+    var settles: Set<Kind> = [.window, .element, .dock, .ground]
     var brushes = true
 
     private(set) var surfaces: [Surface] = []
@@ -241,7 +249,7 @@ final class SnowWorld {
                     fall: 22 + 58 * depth, drift: 0.6 + 0.8 * depth,
                     sway: .random(in: 6...18), swayRate: .random(in: 0.6...1.8), phase: .random(in: 0...(2 * .pi)),
                     size: (1.2 + 3.4 * depth) * flakeScale, alpha: 0.35 + 0.6 * depth, soft: 1 - 0.6 * depth,
-                    lands: depth > 0.3, screen: i))
+                    lands: depth > 0.3, front: .random(in: 0...1) < Self.frontShare, screen: i))
             }
         }
     }
@@ -269,7 +277,7 @@ final class SnowWorld {
                 fall: .random(in: 8...22), drift: .random(in: 1.3...1.9),
                 sway: .random(in: 2...6), swayRate: .random(in: 1...2.5), phase: .random(in: 0...(2 * .pi)),
                 size: size, alpha: .random(in: 0.5...0.85), soft: 0.6,
-                push: SIMD2(0, .random(in: 15...55)), lands: true, screen: screen))
+                push: SIMD2(0, .random(in: 15...55)), lands: true, front: false, screen: screen))
         }
     }
 
@@ -292,8 +300,10 @@ final class SnowWorld {
             f.vx += f.push.x * dt * 4
             f.vy = -f.fall + f.push.y
             let nx = f.x + f.vx * dt, ny = f.y + f.vy * dt
-            if f.lands, let s = landing(x: nx, from: f.y, to: ny) {
-                deposit(on: s, x: nx, amount: 0.3 * f.size / 2.5 * (0.3 + 1.4 * heap(s, x: nx)))
+            if f.lands, let s = landing(x: nx, from: f.y, to: ny, front: f.front) {
+                // Window tops miss the flakes falling in front, so the rest settle a little heavier there and the drifts grow as before.
+                let share: Float = s.kind == .window ? 1 / (1 - Self.frontShare) : 1
+                deposit(on: s, x: nx, amount: share * 0.3 * f.size / 2.5 * (0.3 + 1.4 * heap(s, x: nx)))
                 continue
             }
             f.x = nx
@@ -341,11 +351,12 @@ final class SnowWorld {
 
     // MARK: Settling
 
-    /// The highest exposed snow surface a piece crosses while moving from `y0` down to `y1` at `x`.
-    private func landing(x: Float, from y0: Float, to y1: Float) -> Surface? {
+    /// The highest exposed snow surface a piece crosses while moving from `y0` down to `y1` at `x`;
+    /// a piece falling in `front` passes window tops.
+    private func landing(x: Float, from y0: Float, to y1: Float, front: Bool = false) -> Surface? {
         var best: Surface?
         var bestY = -Float.infinity
-        for s in surfaces where x >= s.left && x < s.right && settles.contains(s.kind) {
+        for s in surfaces where x >= s.left && x < s.right && settles.contains(s.kind) && !(front && s.kind == .window) {
             let sy = s.top + s.height(at: x)
             if y0 >= sy, y1 < sy, sy > bestY, isExposed(s, x: x) {
                 best = s
@@ -361,7 +372,7 @@ final class SnowWorld {
             return true
         case .ground:
             return dock?.contains(CGPoint(x: CGFloat(x), y: CGFloat(s.top) + 1)) != true
-        case .window:
+        case .window, .element:
             let edge = CGPoint(x: CGFloat(x), y: CGFloat(s.top) - 0.5)
             if dock?.contains(edge) == true { return false }
             return !fronts.prefix(s.z).contains { $0.contains(edge) }
@@ -464,23 +475,37 @@ final class SnowWorld {
 
     // MARK: Windows
 
-    /// `windows` runs front to back, as the window server lists them.
-    func updateWindows(_ windows: [(key: Int, frame: CGRect)], dock newDock: CGRect?, now: CFTimeInterval) {
+    /// `windows` runs front to back, as the window server lists them; each of the `elements` lies inside `window`.
+    func updateWindows(_ windows: [(key: Int, frame: CGRect)], elements: [(key: Int, frame: CGRect, window: Int)] = [],
+                       dock newDock: CGRect?, now: CFTimeInterval) {
         let elapsed = Float(max(now - lastPoll, 0.02))
         lastPoll = now
         fronts = windows.map(\.frame)
         dock = newDock
         var live = Set<Int>()
+        var order: [Int: Int] = [:]
         for (z, w) in windows.enumerated() {
             live.insert(w.key)
+            order[w.key] = z
             place(key: w.key, kind: .window, frame: w.frame, cap: Self.windowCap, z: z, elapsed: elapsed)
+        }
+        for e in elements {
+            guard let z = order[e.window] else { continue }
+            live.insert(e.key)
+            place(key: e.key, kind: .element, frame: e.frame, cap: Self.windowCap, z: z, elapsed: elapsed)
+            byKey[e.key]?.owner = e.window
         }
         if let d = newDock {
             live.insert(Self.dockKey)
             place(key: Self.dockKey, kind: .dock, frame: d, cap: Self.dockCap, z: -1, elapsed: elapsed)
         }
         for s in surfaces where s.kind != .ground && !live.contains(s.key) {
-            if let frame = frames[s.key], !s.isBare { stashed[s.key] = (s, frame, now) }
+            if let owner = s.owner, order[owner] != nil {
+                // The field moved or went away inside a window that is still there: its snow falls off.
+                shed(s, velocity: .zero)
+            } else if let frame = frames[s.key], !s.isBare {
+                stashed[s.key] = (s, frame, now)
+            }
             byKey[s.key] = nil
             frames[s.key] = nil
         }
@@ -490,8 +515,13 @@ final class SnowWorld {
 
     private func place(key: Int, kind: Kind, frame: CGRect, cap: Float, z: Int, elapsed: Float) {
         // Window corners are rounded, so snow only lies along the straight part of the top edge.
-        let inset: Float = kind == .window ? Self.cornerInset : 0
-        let left = Float(frame.minX) + inset, top = Float(frame.maxY)
+        let inset: Float = kind == .window ? Self.cornerInset : kind == .element ? Self.elementInset : 0
+        let left = Float(frame.minX) + inset
+        var top = Float(frame.maxY)
+        // A full-screen or maximised window has no room above it, so its snow lies along its top inside the screen.
+        if kind == .window, let roof = screens.first(where: { $0.minX <= frame.midX && frame.midX < $0.maxX && $0.minY < frame.maxY && frame.maxY <= $0.maxY + 1 })?.maxY {
+            top = min(top, Float(roof) - cap)
+        }
         let count = max(1, Int((Float(frame.width) - 2 * inset) / Self.columnWidth))
         frames[key] = frame
         guard let s = byKey[key] else {
@@ -507,7 +537,7 @@ final class SnowWorld {
         let velocity = SIMD2(left - s.left, top - s.top) / elapsed
         let speed = (velocity * velocity).sum().squareRoot()
         // A gentle move carries the snow along; a jerk or a quick drop shakes some of it loose, more the harder it is.
-        if kind == .window, speed > Self.carrySpeed || -velocity.y > Self.carrySpeed * 0.6 {
+        if kind == .window || kind == .element, speed > Self.carrySpeed || -velocity.y > Self.carrySpeed * 0.6 {
             let jolt = max(speed - Self.carrySpeed, -velocity.y - Self.carrySpeed * 0.6)
             shed(s, velocity: velocity, share: min(0.35 + jolt / 900, 1))
         }
@@ -544,7 +574,7 @@ final class SnowWorld {
             switch s.kind {
             case .dock: break
             case .ground: rects = dock.map { [$0] } ?? []
-            case .window: rects = Array(fronts.prefix(s.z)) + (dock.map { [$0] } ?? [])
+            case .window, .element: rects = Array(fronts.prefix(s.z)) + (dock.map { [$0] } ?? [])
             }
             let occluders = rects.filter { $0.intersects(box) }
                 .map { SIMD4(Float($0.minX), Float($0.minY), Float($0.maxX), Float($0.maxY)) }

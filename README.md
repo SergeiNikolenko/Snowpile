@@ -1,6 +1,6 @@
 # Snowpile
 
-Snow for your Mac. Flakes drift down over everything, pile up on the tops of your windows, on the Dock and along the bottom of the screen, and brush aside as your pointer passes through. Move a window gently and the snow rides along; jerk it and the snow shakes loose. Each Space keeps its own snow.
+Snow for your Mac. Flakes drift down over everything, pile up on the tops of your windows, on text fields inside them, on desktop widgets, on the Dock and along the bottom of the screen, and brush aside as your pointer passes through. Move a window gently and the snow rides along; jerk it and the snow shakes loose. Each Space keeps its own snow.
 
 Hold **Option** and move the pointer along a drift to roll a snowball; it picks snow up and grows as it goes. Let go of Option to set it down. Roll the next ball up to it and it goes on top: two or three balls make a snowman, with a carrot nose, coal eyes and buttons, and twig arms. Snowmen ride along on windows you move gently, fall apart when you jerk the window or swipe through them, and melt when the snow stops or it thaws. **Build a Snowman** in the menu puts a ready one at the bottom of the screen.
 
@@ -16,7 +16,7 @@ Download `Snowpile-<version>.dmg` from the [latest release](https://github.com/S
 
 Snowpile is not notarized by Apple yet, so the first launch needs one extra step: open it, then go to System Settings → Privacy & Security and click **Open Anyway**. After that it updates itself.
 
-To let snow settle on the Dock, allow Snowpile in System Settings → Privacy & Security → Accessibility (Settings → Dock → Allow… takes you there). It only reads where the Dock is.
+To let snow settle on the Dock and on text fields inside windows, allow Snowpile in System Settings → Privacy & Security → Accessibility (Settings → Dock → Allow… takes you there). It only reads where the Dock and the text fields of the app in front are.
 
 ## Settings
 

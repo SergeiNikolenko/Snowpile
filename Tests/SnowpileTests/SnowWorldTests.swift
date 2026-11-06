@@ -41,6 +41,24 @@ final class SnowWorldTests: XCTestCase {
         XCTAssertEqual(drift(world), before)
     }
 
+    func testSnowSettlesOnAFullScreenWindowAndOnFieldsInsideWindows() throws {
+        let world = SnowWorld()
+        world.intensity = 3
+        world.setScreens([screen])
+        let field = (key: 1 << 40 | 5, frame: CGRect(x: 300, y: 300, width: 400, height: 30), window: 7)
+        var now = 1.0
+        while now < 200 {
+            now += 0.05
+            world.updateWindows([(7, window), (8, screen)], elements: [field], dock: nil, now: now)
+            world.step(now: now)
+        }
+        let full = try XCTUnwrap(world.surfaces.first { $0.key == 8 })
+        XCTAssertLessThanOrEqual(full.top + full.cap, Float(screen.maxY))
+        XCTAssertGreaterThan(full.columns.reduce(0, +), 50)
+        let inside = try XCTUnwrap(world.surfaces.first { $0.key == field.key })
+        XCTAssertGreaterThan(inside.columns.reduce(0, +), 20)
+    }
+
     func testConnectingADisplayKeepsFloorSnow() throws {
         let world = SnowWorld()
         world.setScreens([screen])

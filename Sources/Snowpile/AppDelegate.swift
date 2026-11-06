@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let preferences = Preferences()
     private let updater = Updater()
     private let weather = WeatherModel()
+    private let elements = ElementLocator()
     private var overlays: [Overlay] = []
     private var statusItem: NSStatusItem!
     private var settingsWindow: NSWindow?
@@ -113,6 +114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         world.brushes = preferences.pointer
         world.settles = Set([
             preferences.onWindows ? .window : nil,
+            preferences.onWindows ? .element : nil,
             preferences.onDock ? .dock : nil,
             preferences.onFloor ? .ground : nil,
         ].compactMap { $0 })
@@ -138,7 +140,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if ticks % 3 == 0 { dockFrame = DockLocator.frame() }
         ticks += 1
         world.setSpaces(SpaceReader.current(for: screens))
-        world.updateWindows(WindowList.current(), dock: dockFrame, now: CACurrentMediaTime())
+        if ticks % 15 == 0 { elements.refresh() }
+        let windows = WindowList.current()
+        world.updateWindows(windows, elements: elements.elements(in: windows), dock: dockFrame, now: CACurrentMediaTime())
         overlays.forEach { $0.setActive(true) }
     }
 
@@ -184,15 +188,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 }
 
 enum WindowList {
-    /// Normal on-screen windows, front to back, in Cocoa coordinates.
+    private static var widgetHost: pid_t?
+
+    /// Normal on-screen windows and then the desktop widgets behind them, front to back, in Cocoa coordinates.
     static func current() -> [(key: Int, frame: CGRect)] {
         guard let primary = NSScreen.screens.first,
-              let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
+              let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]]
         else { return [] }
         let height = primary.frame.height
         let me = Int(getpid())
+        if widgetHost.flatMap(NSRunningApplication.init(processIdentifier:)) == nil {
+            widgetHost = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.notificationcenterui").first?.processIdentifier
+        }
         return info.compactMap { w in
-            guard (w[kCGWindowLayer as String] as? Int) == 0,
+            let layer = w[kCGWindowLayer as String] as? Int
+            // Desktop widgets are named windows of Notification Center sitting below the normal windows.
+            let widget = layer.map { $0 < 0 } == true && (w[kCGWindowOwnerPID as String] as? Int).map(pid_t.init) == widgetHost
+                && !(w[kCGWindowName as String] as? String ?? "").isEmpty
+            guard layer == 0 || widget,
                   (w[kCGWindowOwnerPID as String] as? Int) != me,
                   (w[kCGWindowAlpha as String] as? Double ?? 1) > 0.05,
                   let number = w[kCGWindowNumber as String] as? Int,
@@ -200,7 +213,9 @@ enum WindowList {
                   let b = CGRect(dictionaryRepresentation: bounds as CFDictionary),
                   b.width >= 80, b.height >= 40
             else { return nil }
-            return (number, CGRect(x: b.minX, y: height - b.maxY, width: b.width, height: b.height))
+            let frame = CGRect(x: b.minX, y: height - b.maxY, width: b.width, height: b.height)
+            // Widget corners are much rounder than a window's.
+            return (number, widget ? frame.insetBy(dx: 12, dy: 0) : frame)
         }
     }
 }
