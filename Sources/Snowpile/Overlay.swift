@@ -60,6 +60,7 @@ final class SnowView: MTKView {
 }
 
 /// A transparent window over one screen, above the Dock and normal windows, click-through except over snow.
+/// It redraws every display frame only while something moves; a still scene is drawn once per change.
 final class Overlay: NSObject, MTKViewDelegate {
     let index: Int
     let frame: CGRect
@@ -68,6 +69,7 @@ final class Overlay: NSObject, MTKViewDelegate {
     private let view: SnowView
     private unowned let world: SnowWorld
     private var shown = false
+    private var animating = false
 
     init(screen: NSScreen, index: Int, world: SnowWorld) {
         self.index = index
@@ -89,7 +91,7 @@ final class Overlay: NSObject, MTKViewDelegate {
         view.colorPixelFormat = .bgra8Unorm
         view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         view.layer?.isOpaque = false
-        view.preferredFramesPerSecond = 60
+        view.preferredFramesPerSecond = 30
         view.isPaused = true
         super.init()
         view.delegate = self
@@ -103,7 +105,8 @@ final class Overlay: NSObject, MTKViewDelegate {
         shown = active
         if active {
             window.orderFrontRegardless()
-            view.isPaused = false
+            view.isPaused = !animating
+            if !animating { view.draw() }
         } else {
             view.isPaused = true
             window.orderOut(nil)
@@ -116,15 +119,29 @@ final class Overlay: NSObject, MTKViewDelegate {
         window.close()
     }
 
+    /// Called on every poll: catches clicks only over snow, and runs the display loop only while snow moves.
+    func update(animating moving: Bool, fast: Bool, changed: Bool) {
+        guard shown else { return }
+        let mouse = NSEvent.mouseLocation
+        let catches = frame.contains(mouse) && world.wantsClick(at: mouse)
+        if window.ignoresMouseEvents == catches { window.ignoresMouseEvents = !catches }
+        let stopped = animating && !moving
+        animating = moving
+        if view.isPaused == moving { view.isPaused = !moving }
+        let rate = fast ? 60 : 30
+        if view.preferredFramesPerSecond != rate { view.preferredFramesPerSecond = rate }
+        if !moving, changed || stopped { view.draw() }
+    }
+
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
     func draw(in view: MTKView) {
         let now = CACurrentMediaTime()
-        world.step(now: now, pointer: NSEvent.mouseLocation,
-                   rolling: NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask) == .option)
-        let mouse = NSEvent.mouseLocation
-        let catches = frame.contains(mouse) && world.wantsClick(at: mouse)
-        if window.ignoresMouseEvents == catches { window.ignoresMouseEvents = !catches }
+        // While the display loop runs, the first screen's overlay moves the snow on; otherwise the poll does.
+        if index == 0, animating {
+            world.step(now: now, pointer: NSEvent.mouseLocation,
+                       rolling: NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask) == .option)
+        }
         let gpu = SnowGPU.shared
         guard let pass = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,
               let commands = gpu.queue.makeCommandBuffer(),

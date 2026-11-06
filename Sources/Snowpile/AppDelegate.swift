@@ -15,6 +15,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var timer: Timer?
     private var dockFrame: CGRect?
     private var ticks = 0
+    private var lastSpaces: [Int] = []
+    private var lastFrames: [CGRect] = []
+    private var lastWindowChange: CFTimeInterval = 0
+    private var lastDigest = 0
+    private var lastStillDraw: CFTimeInterval = 0
     private lazy var pauseItem = item("Pause Snow", #selector(togglePause))
     private lazy var modeItem: NSMenuItem = {
         let modes = NSMenu()
@@ -132,18 +137,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         poll()
     }
 
+    /// Runs 30 times a second. The window list is read at full rate only while a mouse button is down or a window
+    /// has just moved, and a few times a second otherwise. A still scene that only fades or thaws is redrawn
+    /// a few times a second; one whose windows just moved, at every poll.
     private func poll() {
         if world.isIdle {
             overlays.forEach { $0.setActive(false) }
             return
         }
-        if ticks % 3 == 0 { dockFrame = DockLocator.frame() }
+        let now = CACurrentMediaTime()
         ticks += 1
-        world.setSpaces(SpaceReader.current(for: screens))
-        if ticks % 15 == 0 { elements.refresh() }
-        let windows = WindowList.current()
-        world.updateWindows(windows, elements: elements.elements(in: windows), dock: dockFrame, now: CACurrentMediaTime())
-        overlays.forEach { $0.setActive(true) }
+        let spaces = SpaceReader.current(for: screens)
+        let switched = spaces != lastSpaces
+        lastSpaces = spaces
+        world.setSpaces(spaces)
+        if ticks % 10 == 0 { dockFrame = DockLocator.frame() }
+        if switched || NSEvent.pressedMouseButtons != 0 || now - lastWindowChange < 1 || ticks % 5 == 0 {
+            if world.settles.contains(.element) { elements.refresh(now: now) }
+            let windows = WindowList.current()
+            let frames = windows.map(\.frame)
+            if frames != lastFrames {
+                lastFrames = frames
+                lastWindowChange = now
+            }
+            world.updateWindows(windows, elements: elements.elements(in: windows), dock: dockFrame, now: now)
+        }
+        if !world.isAnimating {
+            world.step(now: now, pointer: NSEvent.mouseLocation,
+                       rolling: NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask) == .option)
+        }
+        let animating = world.isAnimating
+        var changed = false
+        if !animating, switched || now - lastWindowChange < 1 || now - lastStillDraw > 0.25 {
+            let digest = world.sceneDigest
+            changed = digest != lastDigest
+            lastDigest = digest
+            if changed { lastStillDraw = now }
+        } else if animating {
+            lastDigest = 0
+        }
+        for overlay in overlays {
+            overlay.setActive(true)
+            overlay.update(animating: animating, fast: world.isAnimatingFast, changed: changed)
+        }
     }
 
     @objc private func chooseMode(_ sender: NSMenuItem) {

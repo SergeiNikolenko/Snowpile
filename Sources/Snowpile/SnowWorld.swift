@@ -68,6 +68,8 @@ final class SnowWorld {
 
     struct Lump {
         var x, y, vx, vy, size, seed: Float
+        /// Share of the lump that settles again where it lands; brushed snow mostly blows away as powder.
+        var keeps: Float = 1
     }
 
     static let columnWidth: Float = 2
@@ -85,6 +87,10 @@ final class SnowWorld {
     private static let frontShare: Float = 0.35
     private static let pointerReach: Float = 80
     private static let broomReach: Float = 12
+    /// Settled snow slowly packs down and blows away: this share of a drift goes per second, plus a thin layer.
+    private static let fade: Float = 1 / 240
+    private static let fadeLayer: Float = 0.01
+    private static let brushedKeeps: Float = 0.25
 
     let start = CACurrentMediaTime()
     var running = true
@@ -132,7 +138,46 @@ final class SnowWorld {
     private var pointer: SIMD2<Float>?
     private var pointerVelocity: SIMD2<Float> = .zero
 
-    var isIdle: Bool { !(running && falling) && held == nil && bodies.isEmpty && flakes.isEmpty && lumps.isEmpty && surfaces.allSatisfy(\.isBare) }
+    var isIdle: Bool { !isAnimating && surfaces.allSatisfy(\.isBare) }
+
+    /// Whether anything is in motion; when nothing is, the scene only changes when its windows, the pointer or the thaw change it.
+    var isAnimating: Bool {
+        running && falling || !flakes.isEmpty || isAnimatingFast
+    }
+
+    /// Whether something moves fast enough to need every display frame; falling flakes look smooth at half the rate.
+    var isAnimatingFast: Bool {
+        !lumps.isEmpty || !bodies.isEmpty || held != nil || roll != nil
+    }
+
+    /// Changes whenever anything drawn changes, so a still scene is not redrawn.
+    var sceneDigest: Int {
+        var total = 0
+        for s in surfaces {
+            var h = Hasher()
+            h.combine(s.key)
+            h.combine(s.left)
+            h.combine(s.top)
+            h.combine(s.z)
+            h.combine(s.columns.reduce(0, +))
+            for man in s.snowmen {
+                h.combine(man.x)
+                h.combine(man.ground)
+                h.combine(man.balls)
+            }
+            for t in s.trees { h.combine(t.grown) }
+            total &+= h.finalize()
+        }
+        var h = Hasher()
+        h.combine(total)
+        for r in fronts + (dock.map { [$0] } ?? []) {
+            h.combine(r.minX)
+            h.combine(r.minY)
+            h.combine(r.width)
+            h.combine(r.height)
+        }
+        return h.finalize()
+    }
 
     /// Each Space keeps its own snow at the bottom of the screen.
     func setSpaces(_ ids: [Int]) {
@@ -217,7 +262,7 @@ final class SnowWorld {
                 loose -= chunk
                 throwLump(x: p.x + .random(in: -Self.broomReach...Self.broomReach), y: s.top + keep + 2, area: chunk,
                           vx: pointerVelocity.x * 0.55 + .random(in: -25...25),
-                          vy: abs(pointerVelocity.y) * 0.25 + .random(in: 40...130))
+                          vy: abs(pointerVelocity.y) * 0.25 + .random(in: 40...130), keeps: Self.brushedKeeps)
             }
         }
     }
@@ -323,7 +368,7 @@ final class SnowWorld {
             l.vx *= max(0, 1 - 0.8 * dt)
             let nx = l.x + l.vx * dt, ny = l.y + l.vy * dt
             if let s = landing(x: nx, from: l.y, to: ny) {
-                deposit(on: s, x: nx, amount: l.size * l.size / (1.32 * Self.columnWidth))
+                deposit(on: s, x: nx, amount: l.keeps * l.size * l.size / (1.32 * Self.columnWidth))
                 continue
             }
             l.x = nx
@@ -335,10 +380,10 @@ final class SnowWorld {
 
     private func melt(_ dt: Float) {
         for s in surfaces {
-            let rate = !running || !settles.contains(s.kind) ? 5 : thaw
-            guard rate > 0 else { continue }
+            let rate = (!running || !settles.contains(s.kind) ? 5 : thaw) + Self.fadeLayer
+            let share = 1 - Self.fade * dt
             for j in s.columns.indices where s.columns[j] > 0 {
-                s.columns[j] = max(0, s.columns[j] - rate * dt)
+                s.columns[j] = max(0, s.columns[j] * share - rate * dt)
             }
         }
         let shrink = (!running ? 3 : thaw * 0.5) * dt
@@ -437,9 +482,10 @@ final class SnowWorld {
         return 0.5 + 0.3 * sin(u * 0.045 + seed) + 0.2 * sin(u * 0.013 + seed * 0.7)
     }
 
-    private func throwLump(x: Float, y: Float, area: Float, vx: Float, vy: Float) {
+    private func throwLump(x: Float, y: Float, area: Float, vx: Float, vy: Float, keeps: Float = 1) {
         guard lumps.count < 2500 else { return }
-        lumps.append(Lump(x: x, y: y, vx: vx, vy: vy, size: min(max(area.squareRoot() * 1.15, 1.3), 7), seed: .random(in: 0.01...1)))
+        lumps.append(Lump(x: x, y: y, vx: vx, vy: vy, size: min(max(area.squareRoot() * 1.15, 1.3), 7), seed: .random(in: 0.01...1),
+                          keeps: keeps))
     }
 
     /// Breaks the drift into lumps that fly off with the window's motion.

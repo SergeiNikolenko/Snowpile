@@ -59,6 +59,42 @@ final class SnowWorldTests: XCTestCase {
         XCTAssertGreaterThan(inside.columns.reduce(0, +), 20)
     }
 
+    func testDriftsFadeOnceTheSnowStops() throws {
+        var (world, now) = snowyWorld()
+        let before = try XCTUnwrap(drift(world)).reduce(0, +)
+        world.falling = false
+        let end = now + 300
+        while now < end {
+            now += 0.1
+            world.step(now: now)
+            world.updateWindows([(7, window)], dock: nil, now: now)
+        }
+        XCTAssertLessThan(try XCTUnwrap(drift(world)).reduce(0, +), before * 0.4)
+    }
+
+    func testBrushedSnowMostlyBlowsAway() throws {
+        let world = SnowWorld()
+        world.falling = false
+        world.setScreens([screen])
+        world.fillFloor()
+        let floor = try XCTUnwrap(world.surfaces.first { $0.key == -1000 })
+        let before = floor.columns.reduce(0, +)
+        var now = 1.0
+        world.step(now: now, pointer: CGPoint(x: 300, y: 10))
+        for x in stride(from: 300, through: 700, by: 20) {
+            now += 1.0 / 60
+            world.step(now: now, pointer: CGPoint(x: CGFloat(x), y: 10))
+        }
+        let brushed = before - floor.columns.reduce(0, +)
+        XCTAssertGreaterThan(brushed, 1000)
+        for _ in 0..<240 {
+            now += 1.0 / 60
+            world.step(now: now, pointer: CGPoint(x: 1100, y: 700))
+        }
+        XCTAssertTrue(world.lumps.isEmpty)
+        XCTAssertLessThan(floor.columns.reduce(0, +), before - brushed * 0.6, "most brushed snow should not settle again")
+    }
+
     func testConnectingADisplayKeepsFloorSnow() throws {
         let world = SnowWorld()
         world.setScreens([screen])
