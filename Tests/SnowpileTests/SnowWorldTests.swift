@@ -41,6 +41,22 @@ final class SnowWorldTests: XCTestCase {
         XCTAssertEqual(drift(world), before)
     }
 
+    func testConnectingADisplayKeepsFloorSnow() throws {
+        let world = SnowWorld()
+        world.setScreens([screen])
+        world.fillFloor()
+        world.buildSnowman()
+        let floor = try XCTUnwrap(world.surfaces.first { $0.key == -1000 })
+        let before = floor.columns
+
+        world.setScreens([screen])
+        world.setScreens([screen, CGRect(x: -1024, y: 100, width: 1024, height: 665)])
+        let after = try XCTUnwrap(world.surfaces.first { $0.key == -1000 })
+        XCTAssertEqual(after.columns, before)
+        XCTAssertEqual(after.snowmen.count, 1)
+        XCTAssertNotNil(world.surfaces.first { $0.key == -1001 })
+    }
+
     func testEachSpaceKeepsItsOwnFloorSnow() throws {
         let (world, _) = snowyWorld()
         world.setSpaces([1])
@@ -78,6 +94,102 @@ final class SnowWorldTests: XCTestCase {
         roll(from: 1150, to: CGFloat(floor.left + man.x))
         XCTAssertEqual(floor.snowmen.count, 1)
         XCTAssertEqual(man.balls.count, 2)
+    }
+
+    private func floorWithSnowmen(at positions: [Float]) throws -> (SnowWorld, SnowWorld.Surface, Double) {
+        let world = SnowWorld()
+        world.falling = false
+        world.setScreens([screen])
+        var now = 1.0
+        world.step(now: now)
+        let floor = try XCTUnwrap(world.surfaces.first { $0.kind == .ground })
+        for x in positions {
+            world.buildSnowman()
+            floor.snowmen.last?.x = x
+            floor.snowmen.last?.ground = 0
+        }
+        now += 0.05
+        world.step(now: now)
+        return (world, floor, now)
+    }
+
+    func testThrownSnowmanKnocksAnotherOneDown() throws {
+        var (world, floor, now) = try floorWithSnowmen(at: [300, 600])
+        let grip = CGPoint(x: 300, y: 40)
+        XCTAssertTrue(world.wantsClick(at: grip))
+        world.grab(at: grip)
+        var p = grip
+        for _ in 0..<8 {
+            now += 1.0 / 60
+            p.x += 20
+            p.y += 4
+            world.step(now: now, pointer: p)
+        }
+        world.letGo()
+        for _ in 0..<180 {
+            now += 1.0 / 60
+            world.step(now: now, pointer: CGPoint(x: 1100, y: 700))
+        }
+        XCTAssertFalse(floor.snowmen.contains { $0.balls.count == 3 && abs($0.x - 600) < 5 })
+    }
+
+    func testSnowballSplatsOnAWindowInsteadOfBouncing() throws {
+        var (world, floor, now) = try floorWithSnowmen(at: [40])
+        floor.snowmen[0].balls = [12]
+        world.updateWindows([(7, window)], dock: nil, now: now)
+        let grip = CGPoint(x: 40, y: 12)
+        world.grab(at: grip)
+        var p = grip
+        for _ in 0..<20 {
+            now += 1.0 / 60
+            p.y += 18
+            world.step(now: now, pointer: p)
+        }
+        for _ in 0..<4 {
+            now += 1.0 / 60
+            p.x += 10
+            world.step(now: now, pointer: p)
+        }
+        world.letGo()
+        var fastest: Float = 0
+        for _ in 0..<60 {
+            now += 1.0 / 60
+            world.step(now: now, pointer: CGPoint(x: 1100, y: 700))
+            fastest = max(fastest, world.bodies.map { -$0.velocity.x }.max() ?? 0)
+        }
+        XCTAssertTrue(world.bodies.isEmpty, "the snowball should splat")
+        XCTAssertFalse(world.lumps.isEmpty)
+        XCTAssertLessThan(fastest, 60, "nothing should spring back off the wall")
+    }
+
+    func testSwipeThroughTheHeadKnocksOnlyTheHeadOff() throws {
+        var (world, floor, now) = try floorWithSnowmen(at: [500])
+        let man = try XCTUnwrap(floor.snowmen.first)
+        let head = man.centres[2]
+        for x in stride(from: 380, through: 620, by: 12) {
+            now += 1.0 / 60
+            world.step(now: now, pointer: CGPoint(x: CGFloat(x), y: CGFloat(head)))
+        }
+        XCTAssertEqual(man.balls.count, 2)
+        XCTAssertFalse(man.face)
+        XCTAssertTrue(world.bodies.contains { $0.face } || floor.snowmen.contains { $0.face })
+    }
+
+    func testTreesGrowInDeepSnowAndSinkWhenItGoes() throws {
+        let (world, floor, start) = try floorWithSnowmen(at: [])
+        var now = start
+        floor.columns = Array(repeating: 30, count: floor.columns.count)
+        for _ in 0..<(60 * 40) {
+            now += 1.0 / 60
+            world.step(now: now)
+        }
+        XCTAssertFalse(floor.trees.isEmpty)
+        floor.columns = Array(repeating: 0, count: floor.columns.count)
+        for _ in 0..<(60 * 5) {
+            now += 1.0 / 60
+            world.step(now: now)
+        }
+        XCTAssertTrue(floor.trees.isEmpty)
     }
 
     func testGentleMoveCarriesSnow() throws {

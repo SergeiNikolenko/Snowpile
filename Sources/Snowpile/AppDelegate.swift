@@ -61,6 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             _ = AXIsProcessTrustedWithOptions([prompt: true] as CFDictionary)
         }
         if CommandLine.arguments.contains("--settings") { showSettings() }
+        if CommandLine.arguments.contains("--deep-snow") { world.fillFloor() }
         if CommandLine.arguments.contains("--snowman") { buildSnowman() }
     }
 

@@ -185,9 +185,28 @@ fragment float4 partFragment(PartOut in [[stage_in]], float2 coord [[point_coord
         float inside = step(-1.0, q.x) * step(q.x, 1.0) * step(abs(q.y), half_);
         a = inside;
         color = mix(float3(0.98, 0.55, 0.16), float3(0.80, 0.33, 0.08), saturate(q.y / max(half_, 0.001) * 0.5 + 0.5));
-    } else {
+    } else if (in.kind < 3.5) {
         a = 1.0 - smoothstep(0.8, 1.0, r);
         color = float3(0.33, 0.22, 0.13);
+    } else {
+        // A fir tree: three tiers over a short trunk, each tier with snow lying along its top.
+        a = 0.0;
+        color = float3(0.36, 0.24, 0.14);
+        if (abs(p.x) < 0.09 && p.y > -1.0 && p.y < -0.7) a = 1.0;
+        for (int t = 0; t < 3; t++) {
+            float low = -0.78 + float(t) * 0.42;
+            float top = low + 0.72 - float(t) * 0.06;
+            float half_ = (0.78 - float(t) * 0.17) * (top - p.y) / (top - low);
+            float jag = 0.04 * sin(p.y * 40.0 + in.seed * 20.0);
+            if (p.y >= low && p.y <= top && abs(p.x) < half_ + jag) {
+                float along = (p.y - low) / (top - low);
+                float edge = half_ - abs(p.x);
+                bool snowy = along > 0.62 || (edge < 0.07 && along > 0.15) || (p.y - low < 0.06 && hash21(floor(p * 18.0) + in.seed) > 0.4);
+                float lit = 0.75 + 0.25 * sign(-p.x);
+                color = snowy ? float3(0.95, 0.97, 1.0) * (0.9 + 0.1 * lit) : float3(0.11, 0.30, 0.19) * lit;
+                a = 1.0;
+            }
+        }
     }
     if (a < 0.003) discard_fragment();
     return float4(color * a, a);

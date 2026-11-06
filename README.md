@@ -4,6 +4,10 @@ Snow for your Mac. Flakes drift down over everything, pile up on the tops of you
 
 Hold **Option** and move the pointer along a drift to roll a snowball; it picks snow up and grows as it goes. Let go of Option to set it down. Roll the next ball up to it and it goes on top: two or three balls make a snowman, with a carrot nose, coal eyes and buttons, and twig arms. Snowmen ride along on windows you move gently, fall apart when you jerk the window or swipe through them, and melt when the snow stops or it thaws. **Build a Snowman** in the menu puts a ready one at the bottom of the screen.
 
+Click a drift to scoop up a snowball, or click a snowman to pick the whole thing up, and throw it with a flick. Thrown snow flies under gravity, splats against the sides of windows and the Dock, and knocks over the snowman it hits, ball by ball depending on where it lands. A hard landing bursts a snowball back into loose snow.
+
+Where snow drifts deep, little fir trees grow out of it; they sink back as the drift goes.
+
 Snowpile lives in the menu bar. From the snowflake you can pause the snow, shake it all off, open Settings and check for updates.
 
 ## Install

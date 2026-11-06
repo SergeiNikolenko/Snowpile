@@ -49,13 +49,23 @@ final class SnowGPU {
     }
 }
 
-/// A transparent, click-through window over one screen, above the Dock and normal windows.
+/// Takes clicks on snow; the window lets every other click through to whatever is below.
+final class SnowView: MTKView {
+    var onPress: () -> Void = {}
+    var onRelease: () -> Void = {}
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with event: NSEvent) { onPress() }
+    override func mouseUp(with event: NSEvent) { onRelease() }
+}
+
+/// A transparent window over one screen, above the Dock and normal windows, click-through except over snow.
 final class Overlay: NSObject, MTKViewDelegate {
     let index: Int
     let frame: CGRect
     private let scale: CGFloat
-    private let window: NSWindow
-    private let view: MTKView
+    private let window: NSPanel
+    private let view: SnowView
     private unowned let world: SnowWorld
     private var shown = false
 
@@ -64,7 +74,9 @@ final class Overlay: NSObject, MTKViewDelegate {
         self.frame = screen.frame
         self.scale = screen.backingScaleFactor
         self.world = world
-        window = NSWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
+        window = NSPanel(contentRect: screen.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        window.hidesOnDeactivate = false
+        window.becomesKeyOnlyIfNeeded = true
         window.setFrame(screen.frame, display: false)
         window.level = .statusBar
         window.backgroundColor = .clear
@@ -73,7 +85,7 @@ final class Overlay: NSObject, MTKViewDelegate {
         window.ignoresMouseEvents = true
         window.isReleasedWhenClosed = false
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
-        view = MTKView(frame: CGRect(origin: .zero, size: screen.frame.size), device: SnowGPU.shared.device)
+        view = SnowView(frame: CGRect(origin: .zero, size: screen.frame.size), device: SnowGPU.shared.device)
         view.colorPixelFormat = .bgra8Unorm
         view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
         view.layer?.isOpaque = false
@@ -81,6 +93,8 @@ final class Overlay: NSObject, MTKViewDelegate {
         view.isPaused = true
         super.init()
         view.delegate = self
+        view.onPress = { [weak world] in world?.grab(at: NSEvent.mouseLocation) }
+        view.onRelease = { [weak world] in world?.letGo() }
         window.contentView = view
     }
 
@@ -108,6 +122,9 @@ final class Overlay: NSObject, MTKViewDelegate {
         let now = CACurrentMediaTime()
         world.step(now: now, pointer: NSEvent.mouseLocation,
                    rolling: NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask) == .option)
+        let mouse = NSEvent.mouseLocation
+        let catches = frame.contains(mouse) && world.wantsClick(at: mouse)
+        if window.ignoresMouseEvents == catches { window.ignoresMouseEvents = !catches }
         let gpu = SnowGPU.shared
         guard let pass = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,
               let commands = gpu.queue.makeCommandBuffer(),
@@ -116,6 +133,15 @@ final class Overlay: NSObject, MTKViewDelegate {
                                   origin: SIMD2(Float(frame.minX), Float(frame.minY)),
                                   scale: Float(scale), time: Float(now - world.start))
         let sceneLength = MemoryLayout<SceneUniforms>.stride
+
+        let trees = world.trees(in: frame)
+        if !trees.isEmpty {
+            let buffer = gpu.device.makeBuffer(bytes: trees, length: trees.count * MemoryLayout<Part>.stride)!
+            encoder.setRenderPipelineState(gpu.parts)
+            encoder.setVertexBuffer(buffer, offset: 0, index: 0)
+            encoder.setVertexBytes(&scene, length: sceneLength, index: 1)
+            encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: trees.count)
+        }
 
         let drifts = world.drifts(in: frame)
         if !drifts.isEmpty {
