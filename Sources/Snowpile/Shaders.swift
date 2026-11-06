@@ -21,8 +21,6 @@ static float hash21(float2 p) {
 struct PieceOut {
     float4 position [[position]];
     float pointSize [[point_size]];
-    float2 axis;      // unit direction of travel in point coordinates
-    float stretch;    // how much longer the piece looks along its travel
     float radius;     // disc radius as a share of the point
     float alpha;
     float soft;
@@ -31,15 +29,11 @@ struct PieceOut {
 
 vertex PieceOut pieceVertex(uint id [[vertex_id]], const device Sprite *pieces [[buffer(0)]], constant Scene &scene [[buffer(1)]]) {
     Sprite s = pieces[id];
-    float speed = length(s.velocity);
-    float stretch = min(speed / 260.0, 1.2);
     float pixels = s.size * scene.scale;
-    float extent = max(pixels * (1.0 + stretch) * (s.lump > 0.0 ? 1.3 : 1.0) * 1.5 + 2.0, 3.0);
+    float extent = max(pixels * (s.lump > 0.0 ? 1.3 : 1.0) * 1.5 + 2.0, 3.0);
     PieceOut out;
     out.position = clipPosition(s.position, scene);
     out.pointSize = extent;
-    out.axis = speed > 1.0 ? float2(s.velocity.x, -s.velocity.y) / speed : float2(0.0, 1.0);
-    out.stretch = stretch;
     out.radius = pixels / extent;
     out.alpha = s.alpha * saturate(pixels / 2.0);
     out.soft = s.soft;
@@ -49,9 +43,7 @@ vertex PieceOut pieceVertex(uint id [[vertex_id]], const device Sprite *pieces [
 
 fragment float4 pieceFragment(PieceOut in [[stage_in]], float2 coord [[point_coord]]) {
     float2 p = (coord - 0.5) * 2.0 / max(in.radius, 0.001);
-    float along = dot(p, in.axis);
-    float across = dot(p, float2(-in.axis.y, in.axis.x));
-    float r = length(float2(along / (1.0 + in.stretch), across));
+    float r = length(p);
     float rim = 0.0;
     if (in.lump > 0.0) {
         float sector = (atan2(p.y, p.x) + M_PI_F) / (2.0 * M_PI_F) * 7.0;
