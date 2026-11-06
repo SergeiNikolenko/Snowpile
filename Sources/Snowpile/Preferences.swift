@@ -17,12 +17,16 @@ final class Preferences: ObservableObject {
     @Published var onDock: Bool { didSet { save(onDock, "onDock") } }
     @Published var onFloor: Bool { didSet { save(onFloor, "onFloor") } }
     @Published var pointer: Bool { didSet { save(pointer, "pointer") } }
+    @Published var followWeather: Bool { didSet { save(followWeather, "followWeather") } }
+    @Published var yandexKey: String { didSet { save(yandexKey, "yandexKey") } }
+    @Published var place: Place { didSet { save((try? JSONEncoder().encode(place)) ?? Data(), "place") } }
     @Published private(set) var opensAtLogin = SMAppService.mainApp.status == .enabled
 
     init() {
         defaults.register(defaults: [
             "snowing": true, "intensity": 1.0, "wind": 1.0, "display": Self.allDisplays,
             "onWindows": true, "onDock": true, "onFloor": true, "pointer": true,
+            "followWeather": false, "yandexKey": "",
         ])
         snowing = defaults.bool(forKey: "snowing")
         intensity = defaults.double(forKey: "intensity")
@@ -32,6 +36,9 @@ final class Preferences: ObservableObject {
         onDock = defaults.bool(forKey: "onDock")
         onFloor = defaults.bool(forKey: "onFloor")
         pointer = defaults.bool(forKey: "pointer")
+        followWeather = defaults.bool(forKey: "followWeather")
+        yandexKey = defaults.string(forKey: "yandexKey") ?? ""
+        place = defaults.data(forKey: "place").flatMap { try? JSONDecoder().decode(Place.self, from: $0) } ?? .moscow
     }
 
     private func save(_ value: Any, _ key: String) {

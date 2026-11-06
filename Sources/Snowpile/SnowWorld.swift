@@ -77,8 +77,14 @@ final class SnowWorld {
 
     let start = CACurrentMediaTime()
     var running = true
+    /// Whether new flakes come down; settled snow stays either way.
+    var falling = true
     var intensity: Float = 1
     var windStrength: Float = 1
+    /// Steady wind in points per second, positive towards the right.
+    var windBase: Float = 0
+    /// How fast settled snow melts away while snowing is on, in points per second.
+    var thaw: Float = 0
     var settles: Set<Kind> = [.window, .dock, .ground]
     var brushes = true
 
@@ -104,7 +110,7 @@ final class SnowWorld {
     private var pointer: SIMD2<Float>?
     private var pointerVelocity: SIMD2<Float> = .zero
 
-    var isIdle: Bool { !running && flakes.isEmpty && lumps.isEmpty && surfaces.allSatisfy(\.isBare) }
+    var isIdle: Bool { !(running && falling) && flakes.isEmpty && lumps.isEmpty && surfaces.allSatisfy(\.isBare) }
 
     /// Each Space keeps its own snow at the bottom of the screen.
     func setSpaces(_ ids: [Int]) {
@@ -140,7 +146,7 @@ final class SnowWorld {
         lastStep = now
         trackPointer(location, dt)
         updateWind(dt)
-        if running { spawn(dt) }
+        if running && falling { spawn(dt) }
         advanceFlakes(dt)
         advanceLumps(dt)
         sweep()
@@ -185,7 +191,7 @@ final class SnowWorld {
     private func updateWind(_ dt: Float) {
         windClock -= dt
         if windClock <= 0 {
-            windTarget = .random(in: -1...1) * 22 * windStrength
+            windTarget = windBase + .random(in: -1...1) * 22 * windStrength
             windClock = .random(in: 5...12)
         }
         wind += (windTarget - wind) * min(dt * 0.4, 1)
@@ -260,9 +266,11 @@ final class SnowWorld {
     }
 
     private func melt(_ dt: Float) {
-        for s in surfaces where !running || !settles.contains(s.kind) {
+        for s in surfaces {
+            let rate = !running || !settles.contains(s.kind) ? 5 : thaw
+            guard rate > 0 else { continue }
             for j in s.columns.indices where s.columns[j] > 0 {
-                s.columns[j] = max(0, s.columns[j] - 5 * dt)
+                s.columns[j] = max(0, s.columns[j] - rate * dt)
             }
         }
     }

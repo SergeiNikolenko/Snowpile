@@ -15,6 +15,7 @@ To let snow settle on the Dock, allow Snowpile in System Settings → Privacy & 
 ## Settings
 
 - Snow on or off, intensity and wind
+- Snow like outside: it snows only when it snows in the chosen city, as hard as it does there and with the real wind. Weather comes from Open-Meteo, or from Yandex Weather when you paste a Yandex Weather API key
 - Which displays it snows on
 - Where snow settles: windows, the Dock, the bottom of the screen
 - Brushing snow with the pointer

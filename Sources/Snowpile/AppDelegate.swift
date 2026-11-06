@@ -2,10 +2,12 @@ import AppKit
 import ApplicationServices
 import SwiftUI
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let world = SnowWorld()
     private let preferences = Preferences()
     private let updater = Updater()
+    private let weather = WeatherModel()
     private var overlays: [Overlay] = []
     private var statusItem: NSStatusItem!
     private var settingsWindow: NSWindow?
@@ -30,6 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = menu
 
         preferences.onChange = { [weak self] in self?.apply() }
+        weather.onChange = { [weak self] in self?.apply() }
         rebuildOverlays()
         NotificationCenter.default.addObserver(self, selector: #selector(rebuildOverlays),
                                                name: NSApplication.didChangeScreenParametersNotification, object: nil)
@@ -60,8 +63,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func apply() {
         world.running = preferences.snowing
-        world.intensity = Float(preferences.intensity)
-        world.windStrength = Float(preferences.wind)
+        weather.follow(preferences.followWeather ? preferences.place : nil, yandexKey: preferences.yandexKey)
+        if preferences.followWeather {
+            let now = weather.conditions
+            world.falling = (now?.snow ?? 0) > 0
+            world.intensity = Float(0.3 + 2.7 * (now?.snow ?? 0))
+            world.windBase = Float(min(max((now?.eastWind ?? 0) * 5, -70), 70))
+            world.windStrength = 0.35
+            world.thaw = Float(min(max(now?.temperature ?? 0, 0) * 0.03, 0.3))
+        } else {
+            world.falling = true
+            world.intensity = Float(preferences.intensity)
+            world.windBase = 0
+            world.windStrength = Float(preferences.wind)
+            world.thaw = 0
+        }
         world.brushes = preferences.pointer
         world.settles = Set([
             preferences.onWindows ? .window : nil,
@@ -108,7 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func showSettings() {
         if settingsWindow == nil {
-            let window = NSWindow(contentViewController: NSHostingController(rootView: SettingsView(preferences: preferences, updater: updater)))
+            let window = NSWindow(contentViewController: NSHostingController(rootView: SettingsView(preferences: preferences, updater: updater, weather: weather)))
             window.title = "Snowpile Settings"
             window.styleMask = [.titled, .closable]
             window.isReleasedWhenClosed = false
