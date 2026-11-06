@@ -7,6 +7,10 @@ struct Conditions: Equatable {
     var temperature: Double
     /// Wind blowing towards the east in m/s; negative blows west.
     var eastWind: Double
+    var windSpeed: Double
+    var gusts: Double
+    /// Snow lying on the ground in metres, when the source reports it.
+    var snowDepth: Double?
 }
 
 struct Place: Codable, Equatable, Identifiable {
@@ -36,6 +40,7 @@ enum Weather {
             struct Fact: Decodable {
                 let temp: Double
                 let wind_speed: Double
+                let wind_gust: Double?
                 let wind_dir: String
                 let prec_type: Int
                 let prec_strength: Double
@@ -46,12 +51,13 @@ enum Weather {
         // prec_type: 2 is rain with snow, 3 is snow.
         let snow = [2, 3].contains(fact.prec_type) ? max(fact.prec_strength, 0.15) : 0
         let from: [String: Double] = ["n": 0, "ne": 45, "e": 90, "se": 135, "s": 180, "sw": 225, "w": 270, "nw": 315]
-        return Conditions(snow: snow, temperature: fact.temp, eastWind: eastward(fact.wind_speed, from: from[fact.wind_dir]))
+        return Conditions(snow: snow, temperature: fact.temp, eastWind: eastward(fact.wind_speed, from: from[fact.wind_dir]),
+                          windSpeed: fact.wind_speed, gusts: fact.wind_gust ?? fact.wind_speed, snowDepth: nil)
     }
 
     private static func openMeteo(_ place: Place) async throws -> Conditions {
         let url = URL(string: "https://api.open-meteo.com/v1/forecast?latitude=\(place.latitude)&longitude=\(place.longitude)"
-            + "&current=temperature_2m,snowfall,weather_code,wind_speed_10m,wind_direction_10m&wind_speed_unit=ms")!
+            + "&current=temperature_2m,snowfall,weather_code,wind_speed_10m,wind_gusts_10m,wind_direction_10m,snow_depth&wind_speed_unit=ms")!
         let (data, _) = try await URLSession.shared.data(from: url)
         struct Reply: Decodable {
             struct Current: Decodable {
@@ -59,7 +65,9 @@ enum Weather {
                 let snowfall: Double
                 let weather_code: Int
                 let wind_speed_10m: Double
+                let wind_gusts_10m: Double
                 let wind_direction_10m: Double
+                let snow_depth: Double?
             }
             let current: Current
         }
@@ -67,7 +75,8 @@ enum Weather {
         let snowCode = (71...77).contains(now.weather_code) || (85...86).contains(now.weather_code)
         let snow = snowCode || now.snowfall > 0 ? min(max(now.snowfall / 1.5, 0.15), 1) : 0
         return Conditions(snow: snow, temperature: now.temperature_2m,
-                          eastWind: eastward(now.wind_speed_10m, from: now.wind_direction_10m))
+                          eastWind: eastward(now.wind_speed_10m, from: now.wind_direction_10m),
+                          windSpeed: now.wind_speed_10m, gusts: now.wind_gusts_10m, snowDepth: now.snow_depth)
     }
 
     /// Meteorological wind direction is where the wind comes from.

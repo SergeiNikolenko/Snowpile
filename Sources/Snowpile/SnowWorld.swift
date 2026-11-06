@@ -83,8 +83,13 @@ final class SnowWorld {
     var windStrength: Float = 1
     /// Steady wind in points per second, positive towards the right.
     var windBase: Float = 0
+    /// When the wind is made up rather than taken from the weather, it now and then turns around.
+    var windWanders = true
     /// How fast settled snow melts away while snowing is on, in points per second.
     var thaw: Float = 0
+    /// How readily a strong wind picks settled snow back up (drifting and blowing snow), 0 to 1.
+    var lift: Float = 0
+    var flakeScale: Float = 1
     var settles: Set<Kind> = [.window, .dock, .ground]
     var brushes = true
 
@@ -101,7 +106,9 @@ final class SnowWorld {
     private var wind: Float = 0
     private var windTarget: Float = 0
     private var windClock: Float = 0
+    private var windSide: Float = 1
     private var spawnDebt: [Float] = []
+    private var liftDebt: Float = 0
     private var lastStep: CFTimeInterval = 0
     private var lastPoll: CFTimeInterval = 0
     /// The Space each screen shows, and the floor snow of Spaces not on screen right now.
@@ -147,6 +154,7 @@ final class SnowWorld {
         trackPointer(location, dt)
         updateWind(dt)
         if running && falling { spawn(dt) }
+        if running { liftSnow(dt) }
         advanceFlakes(dt)
         advanceLumps(dt)
         sweep()
@@ -191,8 +199,9 @@ final class SnowWorld {
     private func updateWind(_ dt: Float) {
         windClock -= dt
         if windClock <= 0 {
-            windTarget = windBase + .random(in: -1...1) * 22 * windStrength
-            windClock = .random(in: 5...12)
+            if windWanders, Float.random(in: 0...1) < 0.12 { windSide = -windSide }
+            windTarget = windBase * (windWanders ? windSide : 1) + .random(in: -1...1) * 22 * windStrength
+            windClock = .random(in: 5...12) / max(windStrength, 1)
         }
         wind += (windTarget - wind) * min(dt * 0.4, 1)
     }
@@ -204,14 +213,45 @@ final class SnowWorld {
                 spawnDebt[i] -= 1
                 guard flakes.count < 5000 else { continue }
                 let depth = pow(Float.random(in: 0...1), 1.6)
+                // In a strong wind most snow arrives from the side it blows from, not only from the top.
+                let sideways = Float.random(in: 0...1) < min(abs(wind) / 150, 0.7)
+                let x = sideways ? (wind > 0 ? Float(screen.minX) - 10 : Float(screen.maxX) + 10)
+                    : .random(in: Float(screen.minX) - 80...Float(screen.maxX) + 80)
+                let y = sideways ? .random(in: Float(screen.minY)...Float(screen.maxY)) : Float(screen.maxY) + .random(in: 4...24)
                 flakes.append(Flake(
-                    x: .random(in: Float(screen.minX) - 80...Float(screen.maxX) + 80),
-                    y: Float(screen.maxY) + .random(in: 4...24), vx: 0, vy: 0,
+                    x: x, y: y, vx: sideways ? wind : 0, vy: 0,
                     fall: 22 + 58 * depth, drift: 0.6 + 0.8 * depth,
                     sway: .random(in: 6...18), swayRate: .random(in: 0.6...1.8), phase: .random(in: 0...(2 * .pi)),
-                    size: 1.2 + 3.4 * depth, alpha: 0.35 + 0.6 * depth, soft: 1 - 0.6 * depth,
+                    size: (1.2 + 3.4 * depth) * flakeScale, alpha: 0.35 + 0.6 * depth, soft: 1 - 0.6 * depth,
                     lands: depth > 0.3, screen: i))
             }
+        }
+    }
+
+    /// A wind well above a breeze lifts loose snow off the drifts and carries it along low over the surface.
+    private func liftSnow(_ dt: Float) {
+        let strength = lift * max(abs(wind) - 40, 0) / 100
+        guard strength > 0 else { return }
+        let snowy = surfaces.filter { settles.contains($0.kind) && !$0.isBare }
+        guard !snowy.isEmpty else { return }
+        liftDebt += strength * 60 * Float(snowy.count) * dt
+        while liftDebt >= 1 {
+            liftDebt -= 1
+            guard flakes.count < 5000, let s = snowy.randomElement() else { continue }
+            let j = Int.random(in: s.columns.indices)
+            guard s.columns[j] > 0.3 else { continue }
+            let x = s.left + (Float(j) + 0.5) * Self.columnWidth
+            guard isExposed(s, x: x),
+                  let screen = screens.firstIndex(where: { $0.minX <= CGFloat(x) && CGFloat(x) < $0.maxX }) else { continue }
+            let taken = min(Float(0.15), s.columns[j])
+            s.columns[j] -= taken
+            let size = Float.random(in: 1...2.2) * flakeScale
+            flakes.append(Flake(
+                x: x, y: s.top + s.columns[j] + 0.5, vx: wind * 0.5, vy: 0,
+                fall: .random(in: 8...22), drift: .random(in: 1.3...1.9),
+                sway: .random(in: 2...6), swayRate: .random(in: 1...2.5), phase: .random(in: 0...(2 * .pi)),
+                size: size, alpha: .random(in: 0.5...0.85), soft: 0.6,
+                push: SIMD2(0, .random(in: 15...55)), lands: true, screen: screen))
         }
     }
 

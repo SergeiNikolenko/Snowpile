@@ -18,6 +18,7 @@ final class Preferences: ObservableObject {
     @Published var onFloor: Bool { didSet { save(onFloor, "onFloor") } }
     @Published var pointer: Bool { didSet { save(pointer, "pointer") } }
     @Published var followWeather: Bool { didSet { save(followWeather, "followWeather") } }
+    @Published var mode: SnowMode { didSet { save(mode.rawValue, "mode") } }
     @Published var yandexKey: String { didSet { save(yandexKey, "yandexKey") } }
     @Published var place: Place { didSet { save((try? JSONEncoder().encode(place)) ?? Data(), "place") } }
     @Published private(set) var opensAtLogin = SMAppService.mainApp.status == .enabled
@@ -26,7 +27,7 @@ final class Preferences: ObservableObject {
         defaults.register(defaults: [
             "snowing": true, "intensity": 1.0, "wind": 1.0, "display": Self.allDisplays,
             "onWindows": true, "onDock": true, "onFloor": true, "pointer": true,
-            "followWeather": false, "yandexKey": "",
+            "followWeather": false, "yandexKey": "", "mode": SnowMode.snow.rawValue,
         ])
         snowing = defaults.bool(forKey: "snowing")
         intensity = defaults.double(forKey: "intensity")
@@ -37,6 +38,7 @@ final class Preferences: ObservableObject {
         onFloor = defaults.bool(forKey: "onFloor")
         pointer = defaults.bool(forKey: "pointer")
         followWeather = defaults.bool(forKey: "followWeather")
+        mode = SnowMode(rawValue: defaults.string(forKey: "mode") ?? "") ?? .snow
         yandexKey = defaults.string(forKey: "yandexKey") ?? ""
         place = defaults.data(forKey: "place").flatMap { try? JSONDecoder().decode(Place.self, from: $0) } ?? .moscow
     }

@@ -34,7 +34,7 @@ vertex PieceOut pieceVertex(uint id [[vertex_id]], const device Sprite *pieces [
     float speed = length(s.velocity);
     float stretch = min(speed / 260.0, 1.2);
     float pixels = s.size * scene.scale;
-    float extent = max(pixels * (1.0 + stretch) * (s.lump > 0.0 ? 1.3 : 1.0) + 2.0, 3.0);
+    float extent = max(pixels * (1.0 + stretch) * (s.lump > 0.0 ? 1.3 : 1.0) * 1.5 + 2.0, 3.0);
     PieceOut out;
     out.position = clipPosition(s.position, scene);
     out.pointSize = extent;
@@ -62,11 +62,14 @@ fragment float4 pieceFragment(PieceOut in [[stage_in]], float2 coord [[point_coo
     }
     float edge = mix(0.75, 0.15, in.soft);
     float a = (1.0 - smoothstep(edge, 1.0, r)) * in.alpha;
-    if (a < 0.003) discard_fragment();
+    // A faint cool halo keeps white flakes readable over white windows; over dark ones it all but vanishes.
+    float halo = (1.0 - smoothstep(0.9, 1.45, r)) * (1.0 - a) * in.alpha * 0.3;
+    if (a + halo < 0.003) discard_fragment();
     float3 snow = float3(0.97, 0.98, 1.0);
     float3 shadow = float3(0.66, 0.72, 0.82);
     float3 color = mix(snow, shadow, saturate(r * r * 0.45 + rim * 0.4));
-    return float4(color * a, a);
+    float3 haloColor = float3(0.36, 0.42, 0.54);
+    return float4(color * a + haloColor * halo, a + halo);
 }
 
 // MARK: Drifts
@@ -79,7 +82,7 @@ struct DriftOut {
 vertex DriftOut driftVertex(uint id [[vertex_id]], constant Scene &scene [[buffer(0)]], constant Drift &drift [[buffer(1)]]) {
     float width = float(drift.count) * drift.columnWidth;
     float2 corner = float2(float(id & 1), float(id >> 1));
-    float2 local = float2(mix(-1.0, width + 1.0, corner.x), mix(-1.5, drift.height + 2.0, corner.y));
+    float2 local = float2(mix(-1.0, width + 1.0, corner.x), mix(-3.0, drift.height + 2.0, corner.y));
     DriftOut out;
     out.position = clipPosition(drift.origin + local, scene);
     out.local = local;
@@ -109,7 +112,12 @@ fragment float4 driftFragment(DriftOut in [[stage_in]], constant Scene &scene [[
     if (h < 0.05) discard_fragment();
     float px = 1.0 / scene.scale;
     float inside = saturate((h - y) / px + 0.5) * saturate((y + 1.0) / px + 0.5) * saturate(h / 0.8);
-    if (inside <= 0.0) discard_fragment();
+    // Outline just above the snow and a contact shadow under it, so a drift reads on a white title bar.
+    float outline = saturate(1.0 - abs(y - h - 0.6) / 0.9) * 0.22 * saturate(h / 1.5);
+    float contact = saturate(1.0 - abs(y + 1.6) / 1.4) * 0.3 * saturate(h / 1.5);
+    float edgeAlpha = max(outline, contact) * (1.0 - inside);
+    if (inside <= 0.0 && edgeAlpha <= 0.003) discard_fragment();
+    if (inside <= 0.0) return float4(float3(0.36, 0.42, 0.54) * edgeAlpha, edgeAlpha);
 
     float dh = depthAt(columns, drift, x + 1.5) - depthAt(columns, drift, x - 1.5);
     float3 normal = normalize(float3(-dh / 3.0, 1.0, 0.6));

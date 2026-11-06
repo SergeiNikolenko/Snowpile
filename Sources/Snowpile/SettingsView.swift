@@ -36,8 +36,13 @@ struct SettingsView: View {
                     }
                     TextField("Yandex Weather Key", text: $preferences.yandexKey, prompt: Text("Paste key"))
                 } else {
-                    Slider(value: $preferences.intensity, in: 0.3...3) { Text("Intensity") }
-                    Slider(value: $preferences.wind, in: 0...2.5) { Text("Wind") }
+                    Picker("Mode", selection: $preferences.mode) {
+                        ForEach(SnowMode.allCases) { Text($0.title).tag($0) }
+                    }
+                    if preferences.mode == .custom {
+                        Slider(value: $preferences.intensity, in: 0.3...3) { Text("Intensity") }
+                        Slider(value: $preferences.wind, in: 0...2.5) { Text("Wind") }
+                    }
                 }
                 if screens.count > 1 {
                     Picker("Displays", selection: $preferences.display) {
@@ -87,7 +92,7 @@ struct SettingsView: View {
 
     private func describe(_ now: Conditions) -> String {
         let temperature = now.temperature.formatted(.number.precision(.fractionLength(0)).sign(strategy: .always(includingZero: false)))
-        let sky = now.snow == 0 ? "no snow" : now.snow < 0.4 ? "light snow" : now.snow < 0.75 ? "snow" : "heavy snow"
+        let sky = SnowMode.outside(now)?.title.lowercased() ?? "no snow"
         return "\(temperature)°, \(sky)"
     }
 }

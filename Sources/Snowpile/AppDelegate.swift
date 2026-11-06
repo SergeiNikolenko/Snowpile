@@ -15,6 +15,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var dockFrame: CGRect?
     private var ticks = 0
     private lazy var pauseItem = item("Pause Snow", #selector(togglePause))
+    private lazy var modeItem: NSMenuItem = {
+        let modes = NSMenu()
+        modes.addItem(item("Like Outside", #selector(chooseMode(_:))))
+        modes.addItem(.separator())
+        for mode in SnowMode.allCases {
+            let entry = item(mode.title, #selector(chooseMode(_:)))
+            entry.representedObject = mode.rawValue
+            modes.addItem(entry)
+        }
+        let entry = NSMenuItem(title: "Mode", action: nil, keyEquivalent: "")
+        entry.submenu = modes
+        return entry
+    }()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -23,6 +36,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         menu.addItem(pauseItem)
+        menu.addItem(modeItem)
         menu.addItem(item("Shake Off Snow", #selector(shakeOff)))
         menu.addItem(.separator())
         menu.addItem(item("Settings…", #selector(showSettings), key: ","))
@@ -50,6 +64,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         pauseItem.title = preferences.snowing ? "Pause Snow" : "Resume Snow"
+        for entry in modeItem.submenu?.items ?? [] where entry.action != nil {
+            let raw = entry.representedObject as? String
+            entry.state = preferences.followWeather ? (raw == nil ? .on : .off) : (raw == preferences.mode.rawValue ? .on : .off)
+        }
     }
 
     private func item(_ title: String, _ action: Selector, key: String = "") -> NSMenuItem {
@@ -66,16 +84,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         weather.follow(preferences.followWeather ? preferences.place : nil, yandexKey: preferences.yandexKey)
         if preferences.followWeather {
             let now = weather.conditions
-            world.falling = (now?.snow ?? 0) > 0
-            world.intensity = Float(0.3 + 2.7 * (now?.snow ?? 0))
-            world.windBase = Float(min(max((now?.eastWind ?? 0) * 5, -70), 70))
-            world.windStrength = 0.35
+            let storm = now.flatMap(SnowMode.outside)?.storm
+            let side: Float = (now?.eastWind ?? 0) < 0 ? -1 : 1
+            let realWind = Float(abs(now?.eastWind ?? 0)) * 6
+            world.falling = (storm?.intensity ?? 0) > 0
+            world.intensity = storm?.intensity ?? 0
+            world.windBase = side * min(max(realWind, storm?.wind ?? 0), 180)
+            world.windWanders = false
+            world.windStrength = storm?.gusts ?? 0.35
+            world.lift = storm?.lift ?? 0
+            world.flakeScale = storm?.flakeScale ?? 1
             world.thaw = Float(min(max(now?.temperature ?? 0, 0) * 0.03, 0.3))
         } else {
-            world.falling = true
-            world.intensity = Float(preferences.intensity)
-            world.windBase = 0
-            world.windStrength = Float(preferences.wind)
+            let storm = preferences.mode.storm
+            let custom = preferences.mode == .custom
+            world.falling = storm.intensity > 0
+            world.intensity = custom ? Float(preferences.intensity) : storm.intensity
+            world.windBase = custom ? 0 : storm.wind
+            world.windWanders = true
+            world.windStrength = custom ? Float(preferences.wind) : storm.gusts
+            world.lift = storm.lift
+            world.flakeScale = storm.flakeScale
             world.thaw = 0
         }
         world.brushes = preferences.pointer
@@ -108,6 +137,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         world.setSpaces(SpaceReader.current(for: screens))
         world.updateWindows(WindowList.current(), dock: dockFrame, now: CACurrentMediaTime())
         overlays.forEach { $0.setActive(true) }
+    }
+
+    @objc private func chooseMode(_ sender: NSMenuItem) {
+        if let raw = sender.representedObject as? String, let mode = SnowMode(rawValue: raw) {
+            preferences.mode = mode
+            preferences.followWeather = false
+        } else {
+            preferences.followWeather = true
+        }
     }
 
     @objc private func togglePause() {
