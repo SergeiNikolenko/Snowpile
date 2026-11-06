@@ -1,0 +1,94 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: snowpile-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and Publish Release
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve version
+        id: version
+        run: |
+          version="$(cat VERSION)"
+          tag="v${version}"
+          if git rev-parse --verify "refs/tags/${tag}" > /dev/null 2>&1; then
+            echo "::error::Release ${tag} already exists. Bump VERSION first."
+            exit 1
+          fi
+          prerelease=false
+          [[ "$version" == *-* ]] && prerelease=true
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+
+      - name: Check Sparkle key
+        env:
+          SNOWPILE_SPARKLE_PRIVATE_KEY: ${{ secrets.SNOWPILE_SPARKLE_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$SNOWPILE_SPARKLE_PRIVATE_KEY" ]]; then
+            echo "::error::Automatic updates need the SNOWPILE_SPARKLE_PRIVATE_KEY secret."
+            exit 1
+          fi
+
+      - name: Fetch Sparkle tools
+        run: |
+          mkdir -p build/sparkle
+          curl -fsSL https://github.com/sparkle-project/Sparkle/releases/download/2.10.1/Sparkle-2.10.1.tar.xz | tar -xJ -C build/sparkle
+
+      - name: Test
+        run: swift test
+
+      - name: Build app
+        env:
+          SNOWPILE_UNIVERSAL: "1"
+        run: ./scripts/bundle.sh
+
+      - name: Package app
+        env:
+          SNOWPILE_SPARKLE_PRIVATE_KEY: ${{ secrets.SNOWPILE_SPARKLE_PRIVATE_KEY }}
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          ditto -c -k --keepParent build/Snowpile.app "Snowpile-${version}.zip"
+          ./scripts/create-dmg.sh build/Snowpile.app "Snowpile-${version}.dmg"
+          shasum -a 256 "Snowpile-${version}.zip" > "Snowpile-${version}.zip.sha256"
+          shasum -a 256 "Snowpile-${version}.dmg" > "Snowpile-${version}.dmg.sha256"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          flags=()
+          [[ "${{ steps.version.outputs.prerelease }}" == "true" ]] && flags+=(--prerelease)
+          gh release create "${{ steps.version.outputs.tag }}" \
+            "Snowpile-${version}.dmg" "Snowpile-${version}.zip" \
+            "Snowpile-${version}.dmg.sha256" "Snowpile-${version}.zip.sha256" \
+            "${flags[@]}" \
+            --target "$GITHUB_SHA" \
+            --title "Snowpile ${version}" \
+            --generate-notes
+
+      - name: Publish update feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SNOWPILE_SPARKLE_PRIVATE_KEY: ${{ secrets.SNOWPILE_SPARKLE_PRIVATE_KEY }}
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          ./scripts/publish-feed.sh "$version"
+          gh release upload "${{ steps.version.outputs.tag }}" "Snowpile-${version}.zip.ed25519" "Snowpile-${version}.dmg.ed25519"
