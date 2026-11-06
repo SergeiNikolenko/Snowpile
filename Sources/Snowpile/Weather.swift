@@ -31,28 +31,38 @@ enum Weather {
     }
 
     private static func yandex(_ place: Place, key: String) async throws -> Conditions {
-        var request = URLRequest(url: URL(string: "https://api.weather.yandex.ru/v2/forecast?lat=\(place.latitude)&lon=\(place.longitude)&limit=1&hours=false")!)
+        var request = URLRequest(url: URL(string: "https://api.weather.yandex.ru/graphql/query")!)
+        request.httpMethod = "POST"
         request.setValue(key, forHTTPHeaderField: "X-Yandex-Weather-Key")
-        request.setValue(key, forHTTPHeaderField: "X-Yandex-API-Key")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let query = "{ weatherByPoint(request: {lat: \(place.latitude), lon: \(place.longitude)}) "
+            + "{ now { temperature precType precStrength windSpeed windDirection } } }"
+        request.httpBody = try JSONEncoder().encode(["query": query])
         let (data, response) = try await URLSession.shared.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.userAuthenticationRequired) }
         struct Reply: Decodable {
-            struct Fact: Decodable {
-                let temp: Double
-                let wind_speed: Double
-                let wind_gust: Double?
-                let wind_dir: String
-                let prec_type: Int
-                let prec_strength: Double
+            struct Data: Decodable {
+                struct Point: Decodable {
+                    struct Now: Decodable {
+                        let temperature: Double
+                        let precType: String
+                        let precStrength: String
+                        let windSpeed: Double
+                        let windDirection: String
+                    }
+                    let now: Now
+                }
+                let weatherByPoint: Point
             }
-            let fact: Fact
+            let data: Data
         }
-        let fact = try JSONDecoder().decode(Reply.self, from: data).fact
-        // prec_type: 2 is rain with snow, 3 is snow.
-        let snow = [2, 3].contains(fact.prec_type) ? max(fact.prec_strength, 0.15) : 0
-        let from: [String: Double] = ["n": 0, "ne": 45, "e": 90, "se": 135, "s": 180, "sw": 225, "w": 270, "nw": 315]
-        return Conditions(snow: snow, temperature: fact.temp, eastWind: eastward(fact.wind_speed, from: from[fact.wind_dir]),
-                          windSpeed: fact.wind_speed, gusts: fact.wind_gust ?? fact.wind_speed, snowDepth: nil)
+        let now = try JSONDecoder().decode(Reply.self, from: data).data.weatherByPoint.now
+        let strength: [String: Double] = ["WEAK": 0.25, "AVERAGE": 0.5, "STRONG": 0.75, "VERY_STRONG": 1]
+        let snow = ["SNOW", "SLEET"].contains(now.precType) ? strength[now.precStrength] ?? 0.15 : 0
+        let from: [String: Double] = ["NORTH": 0, "NORTH_EAST": 45, "EAST": 90, "SOUTH_EAST": 135,
+                                      "SOUTH": 180, "SOUTH_WEST": 225, "WEST": 270, "NORTH_WEST": 315]
+        return Conditions(snow: snow, temperature: now.temperature, eastWind: eastward(now.windSpeed, from: from[now.windDirection]),
+                          windSpeed: now.windSpeed, gusts: now.windSpeed * 1.3, snowDepth: nil)
     }
 
     private static func openMeteo(_ place: Place) async throws -> Conditions {

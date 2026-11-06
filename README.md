@@ -15,7 +15,7 @@ To let snow settle on the Dock, allow Snowpile in System Settings → Privacy & 
 ## Settings
 
 - Snow on or off and its mode: flurries, snow, heavy snow, drifting snow, blowing snow, a blizzard, or your own intensity and wind
-- Snow like outside: it snows only when it snows in the chosen city, and the mode follows the weather there: flurries to heavy snow by how hard it falls, blowing snow and a blizzard when the wind picks up, drifting snow when the wind lifts snow that already lies. Weather comes from Open-Meteo, or from Yandex Weather when you paste a Yandex Weather API key
+- Snow like outside: it snows only when it snows in the chosen city, and the mode follows the weather there: flurries to heavy snow by how hard it falls, blowing snow and a blizzard when the wind picks up, drifting snow when the wind lifts snow that already lies. Weather comes from Open-Meteo, or from Yandex Weather when you paste a key for its (paid) Weather API
 - Which displays it snows on
 - Where snow settles: windows, the Dock, the bottom of the screen
 - Brushing snow with the pointer

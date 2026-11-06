@@ -72,6 +72,7 @@ final class SnowWorld {
     private static let dockCap: Float = 10
     private static let groundCap: Float = 30
     private static let carrySpeed: Float = 600
+    private static let cornerInset: Float = 10
     private static let pointerReach: Float = 80
     private static let broomReach: Float = 12
 
@@ -462,8 +463,10 @@ final class SnowWorld {
     }
 
     private func place(key: Int, kind: Kind, frame: CGRect, cap: Float, z: Int, elapsed: Float) {
-        let left = Float(frame.minX), top = Float(frame.maxY)
-        let count = max(1, Int(Float(frame.width) / Self.columnWidth))
+        // Window corners are rounded, so snow only lies along the straight part of the top edge.
+        let inset: Float = kind == .window ? Self.cornerInset : 0
+        let left = Float(frame.minX) + inset, top = Float(frame.maxY)
+        let count = max(1, Int((Float(frame.width) - 2 * inset) / Self.columnWidth))
         frames[key] = frame
         guard let s = byKey[key] else {
             // A window coming back where it was gets its snow back; anywhere else it quietly starts bare.
