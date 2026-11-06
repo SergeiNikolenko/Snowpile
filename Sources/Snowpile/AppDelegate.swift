@@ -38,6 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(pauseItem)
         menu.addItem(modeItem)
         menu.addItem(item("Shake Off Snow", #selector(shakeOff)))
+        menu.addItem(item("Build a Snowman", #selector(buildSnowman)))
         menu.addItem(.separator())
         menu.addItem(item("Settings…", #selector(showSettings), key: ","))
         menu.addItem(item("Check for Updates…", #selector(checkForUpdates)))
@@ -60,6 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             _ = AXIsProcessTrustedWithOptions([prompt: true] as CFDictionary)
         }
         if CommandLine.arguments.contains("--settings") { showSettings() }
+        if CommandLine.arguments.contains("--snowman") { buildSnowman() }
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -150,6 +152,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func togglePause() {
         preferences.snowing.toggle()
+    }
+
+    @objc private func buildSnowman() {
+        world.buildSnowman()
+        poll()
     }
 
     @objc private func shakeOff() {

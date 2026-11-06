@@ -23,6 +23,7 @@ final class SnowGPU {
     let queue: MTLCommandQueue
     let sprites: MTLRenderPipelineState
     let drifts: MTLRenderPipelineState
+    let parts: MTLRenderPipelineState
 
     private init() {
         let device = MTLCreateSystemDefaultDevice()!
@@ -44,6 +45,7 @@ final class SnowGPU {
         }
         sprites = pipeline("pieceVertex", "pieceFragment")
         drifts = pipeline("driftVertex", "driftFragment")
+        parts = pipeline("partVertex", "partFragment")
     }
 }
 
@@ -104,7 +106,8 @@ final class Overlay: NSObject, MTKViewDelegate {
 
     func draw(in view: MTKView) {
         let now = CACurrentMediaTime()
-        world.step(now: now, pointer: NSEvent.mouseLocation)
+        world.step(now: now, pointer: NSEvent.mouseLocation,
+                   rolling: NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask) == .option)
         let gpu = SnowGPU.shared
         guard let pass = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,
               let commands = gpu.queue.makeCommandBuffer(),
@@ -141,6 +144,15 @@ final class Overlay: NSObject, MTKViewDelegate {
                 encoder.setFragmentBufferOffset(offset.occluders, index: 3)
                 encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             }
+        }
+
+        let parts = world.parts(in: frame)
+        if !parts.isEmpty {
+            let buffer = gpu.device.makeBuffer(bytes: parts, length: parts.count * MemoryLayout<Part>.stride)!
+            encoder.setRenderPipelineState(gpu.parts)
+            encoder.setVertexBuffer(buffer, offset: 0, index: 0)
+            encoder.setVertexBytes(&scene, length: sceneLength, index: 1)
+            encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: parts.count)
         }
 
         let sprites = world.sprites(screen: index, frame: frame)

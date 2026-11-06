@@ -27,6 +27,7 @@ final class SnowWorld {
         var z: Int
         var spillLeft: Float = 0
         var spillRight: Float = 0
+        var snowmen: [Snowman] = []
 
         init(key: Int, kind: Kind, left: Float, top: Float, count: Int, cap: Float, z: Int) {
             self.key = key
@@ -40,7 +41,7 @@ final class SnowWorld {
 
         var width: Float { Float(columns.count) * SnowWorld.columnWidth }
         var right: Float { left + width }
-        var isBare: Bool { !columns.contains { $0 > 0.05 } }
+        var isBare: Bool { snowmen.isEmpty && !columns.contains { $0 > 0.05 } }
 
         func height(at x: Float) -> Float {
             let i = Int(((x - left) / SnowWorld.columnWidth).rounded(.down))
@@ -114,7 +115,8 @@ final class SnowWorld {
     private var lastPoll: CFTimeInterval = 0
     /// The Space each screen shows, and the floor snow of Spaces not on screen right now.
     private var spaces: [Int] = []
-    private var floors: [String: [Float]] = [:]
+    private var floors: [String: (columns: [Float], snowmen: [Snowman])] = [:]
+    private var roll: Roll?
     private var pointer: SIMD2<Float>?
     private var pointerVelocity: SIMD2<Float> = .zero
 
@@ -126,8 +128,10 @@ final class SnowWorld {
         guard ids.count == spaces.count else { return }
         for (i, (old, new)) in zip(spaces, ids).enumerated() where old != new {
             guard let floor = byKey[-1000 - i] else { continue }
-            floors["\(i):\(old)"] = floor.isBare ? nil : floor.columns
-            floor.columns = floors.removeValue(forKey: "\(i):\(new)") ?? Array(repeating: 0, count: floor.columns.count)
+            floors["\(i):\(old)"] = floor.isBare ? nil : (floor.columns, floor.snowmen)
+            let kept = floors.removeValue(forKey: "\(i):\(new)")
+            floor.columns = kept?.columns ?? Array(repeating: 0, count: floor.columns.count)
+            floor.snowmen = kept?.snowmen ?? []
         }
     }
 
@@ -147,12 +151,14 @@ final class SnowWorld {
 
     // MARK: Time
 
-    func step(now: CFTimeInterval, pointer location: CGPoint? = nil) {
+    /// `rolling` is true while the snowman key (Option) is held.
+    func step(now: CFTimeInterval, pointer location: CGPoint? = nil, rolling: Bool = false) {
         guard lastStep > 0 else { lastStep = now; return }
         guard now - lastStep > 0.0005 else { return }
         let dt = Float(min(now - lastStep, 0.05))
         lastStep = now
         trackPointer(location, dt)
+        rollSnow(rolling: rolling, dt)
         updateWind(dt)
         if running && falling { spawn(dt) }
         if running { liftSnow(dt) }
@@ -163,7 +169,7 @@ final class SnowWorld {
     }
 
     private func trackPointer(_ location: CGPoint?, _ dt: Float) {
-        guard brushes, let location else { pointer = nil; return }
+        guard let location else { pointer = nil; return }
         let p = SIMD2(Float(location.x), Float(location.y))
         let measured = pointer.map { (p - $0) / dt } ?? .zero
         pointerVelocity += (measured - pointerVelocity) * min(dt * 20, 1)
@@ -172,9 +178,10 @@ final class SnowWorld {
 
     /// A moving pointer brushes through a drift and knocks the snow above its tip loose.
     private func sweep() {
-        guard let p = pointer else { return }
+        guard brushes, roll == nil, let p = pointer else { return }
         let speed = (pointerVelocity * pointerVelocity).sum().squareRoot()
         guard speed > 60 else { return }
+        if speed > 250 { knockSnowmen(at: p) }
         for s in surfaces where p.x >= s.left - Self.broomReach && p.x <= s.right + Self.broomReach {
             let h = s.height(at: min(max(p.x, s.left), s.right - 0.01))
             guard p.y >= s.top - 4, p.y <= s.top + h + 6, isExposed(s, x: p.x) else { continue }
@@ -261,7 +268,7 @@ final class SnowWorld {
         kept.reserveCapacity(flakes.count)
         for var f in flakes {
             f.phase += f.swayRate * dt
-            if let p = pointer {
+            if brushes, let p = pointer {
                 let away = SIMD2(f.x, f.y) - p
                 let distance = (away * away).sum().squareRoot()
                 if distance < Self.pointerReach, distance > 0.01 {
@@ -313,6 +320,12 @@ final class SnowWorld {
             for j in s.columns.indices where s.columns[j] > 0 {
                 s.columns[j] = max(0, s.columns[j] - rate * dt)
             }
+        }
+        let shrink = (!running ? 3 : thaw * 0.5) * dt
+        guard shrink > 0 else { return }
+        for s in surfaces where !s.snowmen.isEmpty {
+            for man in s.snowmen { man.balls = man.balls.map { $0 - shrink }.filter { $0 > 2 } }
+            s.snowmen.removeAll { $0.balls.isEmpty }
         }
     }
 
@@ -430,6 +443,8 @@ final class SnowWorld {
         }
         s.spillLeft = 0
         s.spillRight = 0
+        for man in s.snowmen { crumble(man, on: s, velocity: v) }
+        s.snowmen = []
     }
 
     func shakeOff() {
@@ -524,5 +539,193 @@ final class SnowWorld {
                 .map { SIMD4(Float($0.minX), Float($0.minY), Float($0.maxX), Float($0.maxY)) }
             return (s, occluders)
         }
+    }
+}
+
+// MARK: Snowmen
+
+/// A stack of up to three snowballs standing on a surface, bottom ball first.
+final class Snowman {
+    /// Position along the surface, measured from its left end, so the snowman rides along with a window.
+    var x: Float
+    /// Height of the snow it stands on, above the surface's top edge.
+    var ground: Float
+    var balls: [Float]
+    let facesRight = Bool.random()
+
+    init(x: Float, ground: Float, balls: [Float]) {
+        self.x = x
+        self.ground = ground
+        self.balls = balls
+    }
+
+    /// Centre height of each ball above the surface's top edge.
+    var centres: [Float] {
+        var out: [Float] = []
+        for (i, r) in balls.enumerated() {
+            out.append(i == 0 ? ground + r * 0.88 : out[i - 1] + balls[i - 1] * 0.78 + r * 0.78)
+        }
+        return out
+    }
+}
+
+/// A snowball being rolled along a drift.
+struct Roll {
+    var key: Int
+    var x: Float
+    var area: Float
+    var radius: Float { (area / .pi).squareRoot() }
+}
+
+/// One piece of a snowman as the shader reads it. `kind`: 0 snowball, 1 coal, 2 carrot, 3 twig.
+struct Part {
+    var position: SIMD2<Float>
+    var size: Float
+    var kind: Float
+    var angle: Float
+    var seed: Float
+}
+
+extension SnowWorld {
+    private static let largestBall: Float = 30
+    private static let smallestBall: Float = 4
+
+    /// While the snowman key is held over a drift, a snowball follows the pointer along it and picks snow up.
+    fileprivate func rollSnow(rolling: Bool, _ dt: Float) {
+        guard rolling, running, let p = pointer else {
+            if let done = roll { release(done) }
+            roll = nil
+            return
+        }
+        guard var current = roll, let s = byKey[current.key] else {
+            roll = surfaces.first { s in
+                guard p.x >= s.left, p.x < s.right else { return false }
+                let h = s.height(at: p.x)
+                return h > 1 && p.y >= s.top - 6 && p.y <= s.top + h + 30 && isExposed(s, x: p.x)
+            }.map { Roll(key: $0.key, x: p.x, area: .pi * 4) }
+            return
+        }
+        let r = current.radius
+        guard p.y > s.top - 40, p.y < s.top + 2 * r + 80 else {
+            release(current)
+            roll = nil
+            return
+        }
+        let target = min(max(p.x, s.left + r), s.right - r)
+        let step = min(max(target - current.x, -400 * dt), 400 * dt)
+        current.x += step
+        if r < Self.largestBall, step != 0 {
+            let reach = max(r * 0.7, 3)
+            let lo = max(0, Int((current.x - reach - s.left) / Self.columnWidth))
+            let hi = min(s.columns.count - 1, Int((current.x + reach - s.left) / Self.columnWidth))
+            if lo <= hi {
+                for j in lo...hi {
+                    let taken = min(s.columns[j], abs(step) * 0.3)
+                    s.columns[j] -= taken
+                    current.area += taken * Self.columnWidth * 1.6
+                }
+            }
+        }
+        roll = current
+    }
+
+    /// A ball let go next to a snowman that still has room goes on top of it; otherwise it starts a new one.
+    private func release(_ done: Roll) {
+        guard let s = byKey[done.key] else { return }
+        let r = done.radius
+        guard r >= Self.smallestBall else {
+            deposit(on: s, x: done.x, amount: done.area / Self.columnWidth)
+            return
+        }
+        let local = done.x - s.left
+        if let man = s.snowmen.first(where: { abs($0.x - local) < $0.balls[0] + r * 0.5 && $0.balls.count < 3 }) {
+            man.balls.append(min(r, man.balls[man.balls.count - 1]))
+        } else {
+            s.snowmen.append(Snowman(x: local, ground: s.height(at: done.x), balls: [r]))
+        }
+    }
+
+    /// Bursts a snowman into lumps that fly off with `velocity`.
+    fileprivate func crumble(_ man: Snowman, on s: Surface, velocity v: SIMD2<Float>) {
+        for (r, centre) in zip(man.balls, man.centres) {
+            let pieces = min(Int(r * r / 10) + 2, 14)
+            for _ in 0..<pieces {
+                let angle = Float.random(in: 0...(2 * .pi))
+                let off = SIMD2(cos(angle), sin(angle)) * (r * Float.random(in: 0...0.8))
+                throwLump(x: s.left + man.x + off.x, y: s.top + centre + off.y, area: .pi * r * r / Float(pieces) * 0.6,
+                          vx: v.x * 0.4 + off.x * 4, vy: max(v.y * 0.3, 0) + .random(in: 20...90))
+            }
+        }
+    }
+
+    /// A fast swipe of the pointer through a snowman knocks it over.
+    fileprivate func knockSnowmen(at p: SIMD2<Float>) {
+        for s in surfaces where !s.snowmen.isEmpty {
+            s.snowmen.removeAll { man in
+                let hit = zip(man.balls, man.centres).contains { r, c in
+                    let d = p - SIMD2(s.left + man.x, s.top + c)
+                    return (d * d).sum() < r * r
+                }
+                if hit { crumble(man, on: s, velocity: pointerVelocity) }
+                return hit
+            }
+        }
+    }
+
+    /// Puts a ready snowman on the bottom of the main screen.
+    func buildSnowman() {
+        guard let floor = byKey[-1000] else { return }
+        let x = Float.random(in: 0.2...0.8) * floor.width
+        floor.snowmen.append(Snowman(x: x, ground: floor.height(at: floor.left + x), balls: [24, 16, 11]))
+    }
+
+    func parts(in frame: CGRect) -> [Part] {
+        var out: [Part] = []
+        let box = frame.insetBy(dx: -40, dy: -40)
+        for s in surfaces where !s.snowmen.isEmpty {
+            for man in s.snowmen {
+                let x = s.left + man.x
+                guard box.contains(CGPoint(x: CGFloat(x), y: CGFloat(s.top + man.ground))),
+                      isExposed(s, x: x) else { continue }
+                out += pieces(of: man, at: SIMD2(x, s.top))
+            }
+        }
+        if let roll, let s = byKey[roll.key] {
+            let r = roll.radius
+            out.append(Part(position: SIMD2(roll.x, s.top + s.height(at: roll.x) + r * 0.88), size: 2 * r, kind: 0, angle: 0, seed: 0.5))
+        }
+        return out
+    }
+
+    private func pieces(of man: Snowman, at base: SIMD2<Float>) -> [Part] {
+        let centres = man.centres
+        var out = zip(man.balls, centres).enumerated().map { i, ball in
+            Part(position: base + SIMD2(0, ball.1), size: 2 * ball.0, kind: 0, angle: 0, seed: Float(i) * 0.37 + 0.1)
+        }
+        guard man.balls.count >= 2, let r = man.balls.last, let c = centres.last else { return out }
+        let side: Float = man.facesRight ? 1 : -1
+        let head = base + SIMD2(0, c)
+        for eye: Float in [-1, 1] {
+            out.append(Part(position: head + SIMD2(r * (0.32 * eye + 0.12 * side), r * 0.25), size: r * 0.24, kind: 1, angle: 0, seed: 0))
+        }
+        out.append(Part(position: head + SIMD2(side * r * 0.55, -r * 0.05), size: r * 1.0, kind: 2,
+                        angle: man.facesRight ? 0 : .pi, seed: 0))
+        let body = man.balls.count - 2
+        let br = man.balls[body], bc = base + SIMD2(0, centres[body])
+        if man.balls.count == 3 {
+            for k: Float in [-0.35, 0, 0.35] {
+                out.append(Part(position: bc + SIMD2(side * br * 0.15, br * k), size: br * 0.16, kind: 1, angle: 0, seed: 0))
+            }
+        }
+        for arm: Float in [-1, 1] {
+            let start = bc + SIMD2(arm * br * 0.8, br * 0.25)
+            for k in 0..<9 {
+                let t = Float(k) / 8
+                out.append(Part(position: start + SIMD2(arm * br * 0.9 * t, br * 0.55 * t * t + br * 0.25 * t),
+                                size: max(br * 0.16, 2.4), kind: 3, angle: 0, seed: 0))
+            }
+            out.append(Part(position: start + SIMD2(arm * br * 0.7, br * 0.62), size: max(br * 0.13, 2), kind: 3, angle: 0, seed: 0))
+        }
+        return out
     }
 }

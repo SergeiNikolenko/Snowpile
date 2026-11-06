@@ -54,6 +54,32 @@ final class SnowWorldTests: XCTestCase {
         XCTAssertEqual(floor.columns, first)
     }
 
+    func testRolledBallsStackIntoASnowman() throws {
+        var (world, now) = snowyWorld()
+        func roll(from start: CGFloat, to end: CGFloat) {
+            var x = start
+            let stride: CGFloat = end > start ? 4 : -4
+            while abs(end - x) >= 4 {
+                now += 1.0 / 60
+                x += stride
+                world.step(now: now, pointer: CGPoint(x: x, y: 4), rolling: true)
+            }
+            now += 1.0 / 60
+            world.step(now: now, pointer: CGPoint(x: x, y: 4), rolling: false)
+        }
+        let floor = try XCTUnwrap(world.surfaces.first { $0.kind == .ground })
+
+        roll(from: 100, to: 700)
+        let man = try XCTUnwrap(floor.snowmen.first)
+        XCTAssertEqual(man.balls.count, 1)
+        XCTAssertGreaterThan(man.balls[0], 6)
+
+        // A second ball rolled up to the first one goes on top of it.
+        roll(from: 1150, to: CGFloat(floor.left + man.x))
+        XCTAssertEqual(floor.snowmen.count, 1)
+        XCTAssertEqual(man.balls.count, 2)
+    }
+
     func testGentleMoveCarriesSnow() throws {
         var (world, now) = snowyWorld()
         let before = try XCTUnwrap(drift(world))

@@ -129,4 +129,67 @@ fragment float4 driftFragment(DriftOut in [[stage_in]], constant Scene &scene [[
     }
     return float4(color * inside, inside);
 }
+// MARK: Snowmen
+
+struct Part { float2 position; float size; float kind; float angle; float seed; };
+
+struct PartOut {
+    float4 position [[position]];
+    float pointSize [[point_size]];
+    float radius;
+    float kind;
+    float angle;
+    float seed;
+};
+
+vertex PartOut partVertex(uint id [[vertex_id]], const device Part *parts [[buffer(0)]], constant Scene &scene [[buffer(1)]]) {
+    Part s = parts[id];
+    float pixels = s.size * scene.scale;
+    float extent = pixels * 1.2 + 2.0;
+    PartOut out;
+    out.position = clipPosition(s.position, scene);
+    out.pointSize = extent;
+    out.radius = pixels / extent;
+    out.kind = s.kind;
+    out.angle = s.angle;
+    out.seed = s.seed;
+    return out;
+}
+
+fragment float4 partFragment(PartOut in [[stage_in]], float2 coord [[point_coord]]) {
+    float2 p = (coord - 0.5) * 2.0 / max(in.radius, 0.001);
+    p.y = -p.y;
+    float r = length(p);
+    float3 color;
+    float a;
+    if (in.kind < 0.5) {
+        // A packed snowball: slightly lumpy, lit from the upper left, with a cool halo for white backgrounds.
+        float angle = atan2(p.y, p.x);
+        r /= 1.0 + 0.025 * sin(angle * 7.0 + in.seed * 40.0) + 0.015 * sin(angle * 13.0 + in.seed * 17.0);
+        a = 1.0 - smoothstep(0.95, 1.0, r);
+        float3 n = float3(p, sqrt(saturate(1.0 - r * r)));
+        float lit = saturate(dot(n, normalize(float3(-0.45, 0.6, 0.65))));
+        color = mix(float3(0.64, 0.71, 0.83), float3(0.97, 0.98, 1.0), 0.2 + 0.8 * lit);
+        color *= 1.0 + (hash21(floor(coord * 40.0) + in.seed) - 0.5) * 0.04;
+        float halo = (1.0 - smoothstep(1.0, 1.15, r)) * (1.0 - a) * 0.3;
+        if (a + halo < 0.003) discard_fragment();
+        return float4(color * a + float3(0.36, 0.42, 0.54) * halo, a + halo);
+    } else if (in.kind < 1.5) {
+        a = 1.0 - smoothstep(0.85, 1.0, r);
+        color = mix(float3(0.10, 0.10, 0.11), float3(0.35, 0.35, 0.38), saturate(dot(p, float2(-0.5, 0.6))) * 0.6);
+    } else if (in.kind < 2.5) {
+        // A carrot: a cone from its root at x = -1 to the tip at x = 1, turned to face `angle`.
+        float c = cos(-in.angle), s = sin(-in.angle);
+        float2 q = float2(c * p.x - s * p.y, s * p.x + c * p.y);
+        float half_ = 0.28 * (1.0 - q.x) * 0.5;
+        float inside = step(-1.0, q.x) * step(q.x, 1.0) * step(abs(q.y), half_);
+        a = inside;
+        color = mix(float3(0.98, 0.55, 0.16), float3(0.80, 0.33, 0.08), saturate(q.y / max(half_, 0.001) * 0.5 + 0.5));
+    } else {
+        a = 1.0 - smoothstep(0.8, 1.0, r);
+        color = float3(0.33, 0.22, 0.13);
+    }
+    if (a < 0.003) discard_fragment();
+    return float4(color * a, a);
+}
 """
