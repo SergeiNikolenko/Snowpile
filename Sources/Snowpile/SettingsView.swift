@@ -8,104 +8,126 @@ struct SettingsView: View {
     @ObservedObject var weather: WeatherModel
     @State private var dockAllowed = AXIsProcessTrusted()
     @State private var choosingPlace = false
+    @State private var showsWeatherKey = false
     private let screens = NSScreen.screens
 
     var body: some View {
-        Form {
-            Section {
-                Toggle("Effects", isOn: $preferences.snowing)
-                Picker("Effect", selection: $preferences.effect) {
-                    ForEach(Effect.allCases, id: \.self) { Text($0.title).tag($0) }
-                }
-                if preferences.effect == .snow {
-                    Picker("Snowfall", selection: $preferences.followWeather) {
-                        Text("Always").tag(false)
-                        Text("Like Outside").tag(true)
-                    }
-                    .pickerStyle(.segmented)
-                    if preferences.followWeather {
-                        LabeledContent("Region") {
-                            Button(preferences.place.name) { choosingPlace = true }
-                                .popover(isPresented: $choosingPlace, arrowEdge: .trailing) {
-                                    PlacePicker { place in
-                                        preferences.place = place
-                                        choosingPlace = false
-                                    }
-                                }
-                        }
-                        if let now = weather.conditions {
-                            LabeledContent("Now", value: describe(now))
-                        } else if weather.failed {
-                            LabeledContent("Now", value: preferences.yandexKey.isEmpty ? "No connection" : "Key not accepted")
-                        }
-                        TextField("Yandex Weather Key", text: $preferences.yandexKey, prompt: Text("Paste key"))
-                    } else {
-                        Picker("Mode", selection: $preferences.mode) {
-                            ForEach(SnowMode.allCases) { Text($0.title).tag($0) }
-                        }
-                        if preferences.mode == .custom {
-                            Slider(value: $preferences.intensity, in: 0.3...3) { Text("Intensity") }
-                            Slider(value: $preferences.wind, in: 0...2.5) { Text("Wind") }
-                        }
-                    }
-                } else {
-                    Slider(value: $preferences.intensity, in: 0.3...3) { Text("Intensity") }
-                    if preferences.effect != .starfall {
-                        Slider(value: $preferences.wind, in: 0...2.5) { Text("Wind") }
-                    }
-                }
-                if screens.count > 1 {
-                    Picker("Displays", selection: $preferences.display) {
-                        Text("All Displays").tag(Preferences.allDisplays)
-                        Text("Main Display").tag(Preferences.mainDisplay)
-                        Divider()
-                        ForEach(screens, id: \.self) { screen in
-                            Text(screen.localizedName).tag(Preferences.id(of: screen))
-                        }
-                    }
-                }
-            }
-            if [.snow, .rain, .sakura, .leaves].contains(preferences.effect) {
-                Section("Settles On") {
-                    Toggle("Windows", isOn: $preferences.onWindows)
-                    if dockAllowed {
-                        Toggle("Dock", isOn: $preferences.onDock)
-                    } else {
-                        LabeledContent("Dock") {
-                            Button("Allow…") {
-                                let prompt = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-                                dockAllowed = AXIsProcessTrustedWithOptions([prompt: true] as CFDictionary)
-                            }
-                        }
-                    }
-                    Toggle("Bottom of Screen", isOn: $preferences.onFloor)
-                }
-            }
-            Section {
-                Toggle("Interact with Pointer", isOn: $preferences.pointer)
-                Toggle("Open at Login", isOn: Binding(get: { preferences.opensAtLogin }, set: preferences.setOpensAtLogin))
-            }
-            Section {
-                Toggle("Check for Updates Automatically", isOn: $updater.automaticallyChecks)
-                LabeledContent("Version \(Updater.currentVersion)") {
-                    Button("Check Now") { updater.checkNow() }
-                        .disabled(!updater.canCheck)
-                }
-            }
+        TabView {
+            effectSettings.tabItem { Text("Effects") }
+            generalSettings.tabItem { Text("General") }
         }
-        .formStyle(.grouped)
-        .animation(.default, value: preferences.followWeather)
-        .frame(width: 400)
-        .fixedSize()
+        .padding(16)
+        .frame(width: 460, height: 370)
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             dockAllowed = AXIsProcessTrusted()
         }
     }
 
-    private func describe(_ now: Conditions) -> String {
-        let temperature = now.temperature.formatted(.number.precision(.fractionLength(0)).sign(strategy: .always(includingZero: false)))
-        let sky = SnowMode.outside(now)?.title.lowercased() ?? "no snow"
-        return "\(temperature)°, \(sky)"
+    private var effectSettings: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 14) {
+                GridRow {
+                    Text("Effect").gridColumnAlignment(.trailing)
+                    HStack {
+                        Picker("Effect", selection: $preferences.selection) {
+                            Text("Like Outside").tag("weather")
+                            Divider()
+                            ForEach(SnowMode.allCases) { mode in
+                                Text(mode == .custom ? "Custom Snow" : mode.title).tag("snow:" + mode.rawValue)
+                            }
+                            Divider()
+                            ForEach(Effect.allCases.filter { $0 != .snow }, id: \.self) { effect in
+                                Text(effect.title).tag(effect.rawValue)
+                            }
+                        }
+                        .labelsHidden()
+                        Toggle("Enable effects", isOn: $preferences.snowing)
+                            .labelsHidden().toggleStyle(.switch).controlSize(.small)
+                    }
+                }
+                if preferences.followWeather {
+                    GridRow {
+                        Text("City")
+                        Button(preferences.place.name) { choosingPlace = true }
+                            .popover(isPresented: $choosingPlace, arrowEdge: .trailing) {
+                                PlacePicker { place in
+                                    preferences.place = place
+                                    choosingPlace = false
+                                }
+                            }
+                    }
+                    GridRow {
+                        Text("Weather")
+                        if let now = weather.conditions {
+                            Text(now.summary)
+                        } else {
+                            Text(weather.failed ? "Could not update" : "Updating…")
+                        }
+                    }
+                } else if preferences.effect != .snow || preferences.mode == .custom {
+                    GridRow {
+                        Text("Intensity")
+                        Slider(value: $preferences.intensity, in: 0.3...3).accessibilityLabel("Intensity")
+                    }
+                    if preferences.effect != .starfall {
+                        GridRow {
+                            Text("Wind")
+                            Slider(value: $preferences.wind, in: 0...2.5).accessibilityLabel("Wind")
+                        }
+                    }
+                }
+            }
+            Divider()
+            if preferences.followWeather || [.snow, .rain, .sakura, .leaves].contains(preferences.effect) {
+                HStack(spacing: 14) {
+                    Text("Settle on")
+                    Toggle("Windows", isOn: $preferences.onWindows)
+                    Toggle("Dock", isOn: $preferences.onDock).disabled(!dockAllowed)
+                        .help("Allow Accessibility in General to use the Dock.")
+                    Toggle("Floor", isOn: $preferences.onFloor)
+                }
+            }
+            Toggle("Interact with pointer", isOn: $preferences.pointer)
+            Spacer(minLength: 0)
+        }
+        .toggleStyle(.checkbox)
+        .padding(20)
+    }
+
+    private var generalSettings: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if screens.count > 1 {
+                Picker("Displays", selection: $preferences.display) {
+                    Text("All Displays").tag(Preferences.allDisplays)
+                    Text("Main Display").tag(Preferences.mainDisplay)
+                    Divider()
+                    ForEach(screens, id: \.self) { screen in
+                        Text(screen.localizedName).tag(Preferences.id(of: screen))
+                    }
+                }
+            }
+            Toggle("Open at login", isOn: Binding(get: { preferences.opensAtLogin }, set: preferences.setOpensAtLogin))
+            Toggle("Check for updates automatically", isOn: $updater.automaticallyChecks)
+            if !dockAllowed {
+                Button("Allow Accessibility…") {
+                    let prompt = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+                    dockAllowed = AXIsProcessTrustedWithOptions([prompt: true] as CFDictionary)
+                }
+            }
+            DisclosureGroup("Yandex Weather", isExpanded: $showsWeatherKey) {
+                SecureField("API key", text: $preferences.yandexKey)
+                    .textFieldStyle(.roundedBorder)
+                    .padding(.top, 4)
+            }
+            Spacer(minLength: 0)
+            HStack {
+                Text("Version \(Updater.currentVersion)")
+                Spacer()
+                Button("Check for Updates…") { updater.checkNow() }.disabled(!updater.canCheck)
+            }
+        }
+        .toggleStyle(.checkbox)
+        .padding(20)
     }
 }
 

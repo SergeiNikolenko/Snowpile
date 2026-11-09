@@ -76,6 +76,26 @@ final class EffectsTests: XCTestCase {
         }
     }
 
+    func testOrdinaryRainDoesNotCreateLightning() {
+        let world = EffectWorld()
+        world.effect = .rain
+        world.lightningEnabled = false
+        world.setScreens([screen])
+        for i in 1...900 { world.step(now: Double(i) / 30, pointer: nil) }
+        XCTAssertFalse(world.particles.isEmpty)
+        XCTAssertFalse(world.particles.contains { $0.kind == 6 })
+    }
+
+    func testDryThunderstormHasLightningWithoutRaindrops() {
+        let world = EffectWorld()
+        world.effect = .rain
+        world.intensity = 0
+        world.setScreens([screen])
+        for i in 1...244 { world.step(now: Double(i) / 30, pointer: nil) }
+        XCTAssertTrue(world.particles.contains { $0.kind == 6 })
+        XCTAssertFalse(world.particles.contains { $0.kind == 0 })
+    }
+
     func testEveryEffectRendersWithMetal() throws {
         let gpu = SnowGPU.shared
         let width = 800, height = 600

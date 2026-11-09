@@ -25,23 +25,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastStillDraw: CFTimeInterval = 0
     private lazy var pauseItem = item("Pause Snow", #selector(togglePause))
     private lazy var shakeItem = item("Shake Off Snow", #selector(shakeOff))
-    private lazy var modeItem: NSMenuItem = {
-        let modes = NSMenu()
-        modes.addItem(item("Like Outside", #selector(chooseMode(_:))))
-        modes.addItem(.separator())
-        for mode in SnowMode.allCases {
-            let entry = item(mode.title, #selector(chooseMode(_:)))
-            entry.representedObject = mode.rawValue
-            modes.addItem(entry)
-        }
-        let entry = NSMenuItem(title: "Mode", action: nil, keyEquivalent: "")
-        entry.submenu = modes
-        return entry
-    }()
-
     private lazy var effectItem: NSMenuItem = {
         let menu = NSMenu()
-        for effect in Effect.allCases {
+        let outside = item("Like Outside", #selector(chooseEffect(_:)))
+        outside.representedObject = "weather"
+        menu.addItem(outside)
+        menu.addItem(.separator())
+        for mode in SnowMode.allCases {
+            let entry = item(mode == .custom ? "Custom Snow" : mode.title, #selector(chooseEffect(_:)))
+            entry.representedObject = "snow:" + mode.rawValue
+            menu.addItem(entry)
+        }
+        menu.addItem(.separator())
+        for effect in Effect.allCases where effect != .snow {
             let entry = item(effect.title, #selector(chooseEffect(_:)))
             entry.representedObject = effect.rawValue
             menu.addItem(entry)
@@ -52,8 +48,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }()
 
     @objc private func chooseEffect(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String, let effect = Effect(rawValue: raw) else { return }
-        preferences.effect = effect
+        guard let raw = sender.representedObject as? String else { return }
+        preferences.selection = raw
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -64,7 +60,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         menu.addItem(pauseItem)
         menu.addItem(effectItem)
-        menu.addItem(modeItem)
         menu.addItem(shakeItem)
         menu.addItem(item("Build a Snowman", #selector(buildSnowman)))
         menu.addItem(.separator())
@@ -95,14 +90,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         pauseItem.title = preferences.snowing ? "Pause Effects" : "Resume Effects"
-        modeItem.isHidden = preferences.effect != .snow
-        shakeItem.isHidden = preferences.effect != .snow
+        shakeItem.isHidden = activeEffect != .snow
         for entry in effectItem.submenu?.items ?? [] {
-            entry.state = entry.representedObject as? String == preferences.effect.rawValue ? .on : .off
-        }
-        for entry in modeItem.submenu?.items ?? [] where entry.action != nil {
-            let raw = entry.representedObject as? String
-            entry.state = preferences.followWeather ? (raw == nil ? .on : .off) : (raw == preferences.mode.rawValue ? .on : .off)
+            entry.state = entry.representedObject as? String == preferences.selection ? .on : .off
         }
     }
 
@@ -115,18 +105,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var shownScreens: [String] = []
     private var screens: [NSScreen] = []
 
+    private var activeEffect: Effect {
+        preferences.followWeather ? weather.conditions?.recommendedEffect ?? .snow : preferences.effect
+    }
+
     private func apply() {
-        world.running = preferences.snowing
-        effects.effect = preferences.effect
-        effects.running = preferences.snowing
-        effects.intensity = Float(preferences.intensity)
-        effects.wind = Float(preferences.wind) * 35
+        weather.follow(preferences.followWeather ? preferences.place : nil, yandexKey: preferences.yandexKey)
+        world.running = preferences.snowing && activeEffect == .snow
+        effects.effect = activeEffect
+        effects.running = preferences.snowing && (!preferences.followWeather || weather.conditions?.recommendedEffect == .rain)
+        effects.intensity = preferences.followWeather ? weather.conditions?.rainIntensity ?? 0 : Float(preferences.intensity)
+        effects.wind = preferences.followWeather ? Float(weather.conditions?.eastWind ?? 0) * 6 : Float(preferences.wind) * 35
+        effects.lightningEnabled = !preferences.followWeather || weather.conditions?.thunderstorm == true
         effects.brushes = preferences.pointer
         effects.onWindows = preferences.onWindows
         effects.onDock = preferences.onDock
         effects.onFloor = preferences.onFloor
         effects.reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        weather.follow(preferences.followWeather && preferences.effect == .snow ? preferences.place : nil, yandexKey: preferences.yandexKey)
         if preferences.followWeather {
             let now = weather.conditions
             let storm = now.flatMap(SnowMode.outside)?.storm
@@ -178,7 +173,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// has just moved, and a few times a second otherwise. A still scene that only fades or thaws is redrawn
     /// a few times a second; one whose windows just moved, at every poll.
     private func poll() {
-        let snow = preferences.effect == .snow
+        let snow = activeEffect == .snow
         if snow ? world.isIdle : effects.isIdle {
             overlays.forEach { $0.setActive(false) }
             return
@@ -231,21 +226,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func chooseMode(_ sender: NSMenuItem) {
-        if let raw = sender.representedObject as? String, let mode = SnowMode(rawValue: raw) {
-            preferences.mode = mode
-            preferences.followWeather = false
-        } else {
-            preferences.followWeather = true
-        }
-    }
-
     @objc private func togglePause() {
         preferences.snowing.toggle()
     }
 
     @objc private func buildSnowman() {
-        preferences.effect = .snow
+        preferences.selection = "snow:" + preferences.mode.rawValue
         world.buildSnowman()
         poll()
     }

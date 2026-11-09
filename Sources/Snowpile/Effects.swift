@@ -74,6 +74,7 @@ final class EffectWorld {
     var intensity: Float = 1
     var wind: Float = 0
     var reduceMotion = false
+    var lightningEnabled = true
     var brushes = true
     private(set) var particles: [Particle] = []
     private(set) var ledges: [Ledge] = []
@@ -133,7 +134,7 @@ final class EffectWorld {
         let cursor = pointer.map { SIMD2(Float($0.x), Float($0.y)) }
         let cursorVelocity = cursor.flatMap { p in previousPointer.map { (p - $0) / dt } } ?? .zero
         previousPointer = cursor
-        let amount = min(max(intensity, 0.1), 3)
+        let amount = min(max(intensity, 0), 3)
         if running {
             for i in screens.indices {
                 let rate: Float
@@ -224,7 +225,7 @@ final class EffectWorld {
             alive.append(p)
         }
         particles = Array((alive + splashes).prefix(2400))
-        if running && effect == .rain && !reduceMotion {
+        if running && effect == .rain && lightningEnabled && !reduceMotion {
             lightningIn -= dt
             if lightningIn <= 0, let screen = screens.indices.randomElement() {
                 lightning(screen: screen)

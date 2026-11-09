@@ -20,13 +20,13 @@ Download `Snowpile-<version>.dmg` from the [latest release](https://github.com/S
 
 Snowpile is not notarized by Apple yet, so the first launch needs one extra step: open it, then go to System Settings → Privacy & Security and click **Open Anyway**. After that it updates itself.
 
-To let snow settle on the Dock and on text fields inside windows, and detect minimized windows, allow Snowpile in System Settings → Privacy & Security → Accessibility (Settings → Dock → Allow… takes you there). It reads window minimization state, Dock geometry, and text-field geometry in the app in front.
+To let snow settle on the Dock and on text fields inside windows, and detect minimized windows, allow Snowpile in System Settings → Privacy & Security → Accessibility (Settings → General → Allow Accessibility… takes you there). It reads window minimization state, Dock geometry, and text-field geometry in the app in front.
 
 ## Settings
 
-- Effect selection, pause, intensity, and wind
-- Snow modes: flurries, snow, heavy snow, drifting snow, blowing snow, a blizzard, or your own intensity and wind
-- Snow like outside: it snows only when it snows in the chosen city, and the mode follows the weather there: flurries to heavy snow by how hard it falls, blowing snow and a blizzard when the wind picks up, drifting snow when the wind lifts snow that already lies. Weather comes from Open-Meteo, or from Yandex Weather when you paste a key for its (paid) Weather API
+- Effects: one picker includes Like Outside, all seven snow presets, and all five other effects. Custom Snow exposes intensity and wind
+- Like Outside: automatically selects snow or rain from the chosen city's weather, follows precipitation intensity and wind, and enables lightning only for thunderstorms. Dry weather produces no precipitation. Snow can drift when wind lifts snow already on the ground, and positive temperatures accelerate thawing. Decorative effects remain manual
+- Weather comes from Open-Meteo, or from Yandex Weather when you supply a key in General → Yandex Weather
 - Which displays it snows on
 - Where snow settles: windows, the Dock, the bottom of the screen
 - Brushing snow with the pointer

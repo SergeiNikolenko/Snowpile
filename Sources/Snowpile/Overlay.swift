@@ -145,6 +145,8 @@ final class Overlay: NSObject, MTKViewDelegate {
         if index == 0, animating {
             if let effects, effects.effect != .snow {
                 effects.step(now: now, pointer: NSEvent.mouseLocation)
+                // Let previously accumulated snow thaw while another effect is visible.
+                if !world.isIdle { world.step(now: now, pointer: nil) }
             } else {
                 world.step(now: now, pointer: NSEvent.mouseLocation,
                            rolling: NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask) == .option)

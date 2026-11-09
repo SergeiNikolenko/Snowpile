@@ -6,7 +6,7 @@ final class Preferences: ObservableObject {
     static let allDisplays = "all"
     static let mainDisplay = "main"
 
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
     var onChange: () -> Void = {}
 
     @Published var effect: Effect { didSet { save(effect.rawValue, "effect") } }
@@ -24,7 +24,25 @@ final class Preferences: ObservableObject {
     @Published var place: Place { didSet { save((try? JSONEncoder().encode(place)) ?? Data(), "place") } }
     @Published private(set) var opensAtLogin = SMAppService.mainApp.status == .enabled
 
-    init() {
+    /// One selection keeps weather and manual presets mutually exclusive in both menus.
+    var selection: String {
+        get { followWeather ? "weather" : effect == .snow ? "snow:" + mode.rawValue : effect.rawValue }
+        set {
+            if newValue == "weather" {
+                followWeather = true
+            } else if newValue.hasPrefix("snow:"), let selected = SnowMode(rawValue: String(newValue.dropFirst(5))) {
+                followWeather = false
+                effect = .snow
+                mode = selected
+            } else if let selected = Effect(rawValue: newValue) {
+                followWeather = false
+                effect = selected
+            }
+        }
+    }
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         defaults.register(defaults: [
             "snowing": true, "intensity": 1.0, "wind": 1.0, "display": Self.allDisplays,
             "onWindows": true, "onDock": true, "onFloor": true, "pointer": true,
