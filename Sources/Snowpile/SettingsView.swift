@@ -17,7 +17,7 @@ struct SettingsView: View {
             generalSettings.tabItem { Text("General") }
         }
         .padding(16)
-        .frame(width: 460, height: 370)
+        .frame(width: 440, height: 310)
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             dockAllowed = AXIsProcessTrusted()
         }
