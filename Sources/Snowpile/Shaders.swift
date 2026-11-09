@@ -25,14 +25,19 @@ struct PieceOut {
     float alpha;
     float soft;
     float lump;
+    float2 trail;
 };
 
 vertex PieceOut pieceVertex(uint id [[vertex_id]], const device Sprite *pieces [[buffer(0)]], constant Scene &scene [[buffer(1)]]) {
     Sprite s = pieces[id];
     float pixels = s.size * scene.scale;
-    float extent = max(pixels * (s.lump > 0.0 ? 1.3 : 1.0) * 1.5 + 2.0, 3.0);
+    float speed = length(s.velocity);
+    float travel = min(speed * 0.014, s.size * 1.8);
+    float2 direction = speed > 0.01 ? s.velocity / speed : float2(0.0);
+    float extent = max((s.size * (s.lump > 0.0 ? 1.3 : 1.0) * 1.5 + travel) * scene.scale + 2.0, 3.0);
     PieceOut out;
-    out.position = clipPosition(s.position, scene);
+    out.position = clipPosition(s.position - direction * travel * 0.5, scene);
+    out.trail = float2(direction.x, -direction.y) * travel * scene.scale / extent;
     out.pointSize = extent;
     out.radius = pixels / extent;
     out.alpha = s.alpha * saturate(pixels / 2.0);
@@ -42,7 +47,9 @@ vertex PieceOut pieceVertex(uint id [[vertex_id]], const device Sprite *pieces [
 }
 
 fragment float4 pieceFragment(PieceOut in [[stage_in]], float2 coord [[point_coord]]) {
-    float2 p = (coord - 0.5) * 2.0 / max(in.radius, 0.001);
+    float2 centered = coord - 0.5;
+    float along = clamp(dot(centered, in.trail) / max(dot(in.trail, in.trail), 0.00001), -0.5, 0.5);
+    float2 p = (centered - in.trail * along) * 2.0 / max(in.radius, 0.001);
     float r = length(p);
     float rim = 0.0;
     if (in.lump > 0.0) {
@@ -210,5 +217,78 @@ fragment float4 partFragment(PartOut in [[stage_in]], float2 coord [[point_coord
     }
     if (a < 0.003) discard_fragment();
     return float4(color * a, a);
+}
+
+// MARK: Weather effects
+
+struct EffectSprite { float2 position; float2 size; float4 color; float4 parameters; };
+struct EffectOut {
+    float4 position [[position]];
+    float2 uv;
+    float4 color;
+    float4 parameters;
+};
+
+vertex EffectOut effectVertex(uint vertexID [[vertex_id]], uint instance [[instance_id]],
+                              const device EffectSprite *sprites [[buffer(0)]], constant Scene &scene [[buffer(1)]]) {
+    const float2 corners[6] = {float2(-1,-1), float2(1,-1), float2(-1,1), float2(-1,1), float2(1,-1), float2(1,1)};
+    EffectSprite sprite = sprites[instance];
+    float2 uv = corners[vertexID];
+    float2 local = uv * sprite.size * 0.5;
+    float c = cos(sprite.parameters.y), s = sin(sprite.parameters.y);
+    float2 rotated = float2(c * local.x - s * local.y, s * local.x + c * local.y);
+    EffectOut out;
+    out.position = clipPosition(sprite.position + rotated, scene);
+    out.uv = uv;
+    out.color = sprite.color;
+    out.parameters = sprite.parameters;
+    return out;
+}
+
+fragment float4 effectFragment(EffectOut in [[stage_in]]) {
+    float2 p = in.uv;
+    float alpha = 0.0;
+    float3 color = in.color.rgb;
+    int kind = int(in.parameters.x + 0.5);
+    if (kind == 0) {
+        alpha = (1.0 - smoothstep(0.2, 1.0, abs(p.y))) * (0.3 + 0.7 * (p.x * 0.5 + 0.5));
+    } else if (kind == 1) {
+        // A notched petal with a soft central fold.
+        float width = 0.62 * sqrt(saturate(1.0 - p.x * p.x)) * (1.0 + 0.3 * p.x);
+        float edge = abs(p.y) - width;
+        float notch = length(p - float2(0.9, 0.0));
+        alpha = (1.0 - smoothstep(-0.08, 0.02, edge)) * smoothstep(0.12, 0.2, notch);
+        color *= 0.76 + 0.24 * (1.0 - abs(p.y));
+        color = mix(color, float3(1.0, 0.9, 0.95), exp(-abs(p.y) * 15.0) * 0.35);
+    } else if (kind == 2) {
+        // Lobed outline, central stem and branching veins.
+        float theta = atan2(p.y, p.x);
+        float lobes = 0.66 + 0.22 * cos(theta * 5.0 + in.parameters.z);
+        float r = length(float2(p.x * 0.88, p.y));
+        alpha = 1.0 - smoothstep(lobes - 0.05, lobes, r);
+        float stem = (1.0 - smoothstep(0.025, 0.06, abs(p.y))) * step(-1.0, p.x) * step(p.x, 0.2);
+        alpha = max(alpha, stem);
+        float veins = exp(-abs(p.y) * 35.0) + exp(-abs(fract((p.x + abs(p.y)) * 3.0) - 0.5) * 35.0) * 0.35;
+        color *= 0.65 + 0.35 * (1.0 - r);
+        color = mix(color, float3(0.32, 0.18, 0.05), saturate(veins) * 0.4);
+    } else if (kind == 3) {
+        float r = length(p);
+        alpha = exp(-r * r * 5.0) * 0.6 + exp(-r * r * 80.0) * 0.4;
+        alpha *= 1.0 - smoothstep(0.8, 1.0, r);
+        color = mix(color, float3(1.0, 1.0, 0.8), exp(-r * r * 50.0));
+    } else if (kind == 4) {
+        float head = p.x * 0.5 + 0.5;
+        alpha = pow(head, 1.8) * exp(-p.y * p.y * 5.0);
+        color = mix(color, float3(1.0), head * head);
+    } else if (kind == 5) {
+        alpha = 1.0 - smoothstep(0.3, 1.0, length(p));
+    } else if (kind == 6) {
+        alpha = exp(-p.y * p.y * 6.0);
+    } else {
+        alpha = (1.0 - smoothstep(0.3, 1.0, abs(p.y))) * 0.8;
+    }
+    alpha *= in.color.a;
+    if (alpha < 0.002) discard_fragment();
+    return float4(color * alpha, alpha);
 }
 """

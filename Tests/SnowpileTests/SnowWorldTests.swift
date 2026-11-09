@@ -267,7 +267,8 @@ final class SnowWorldTests: XCTestCase {
         let lumps = world.lumps.count
         now += 1.0 / 30
         world.updateWindows([(7, window.offsetBy(dx: 60, dy: 0))], dock: nil, now: now)
-        XCTAssertGreaterThan(world.lumps.count, lumps)
+        world.step(now: now)
+        XCTAssertTrue(world.lumps.count > lumps || !world.sheets.isEmpty)
         XCTAssertLessThan(try XCTUnwrap(drift(world)).reduce(0, +), before)
     }
 }

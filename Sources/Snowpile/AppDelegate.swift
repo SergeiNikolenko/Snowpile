@@ -5,6 +5,8 @@ import SwiftUI
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let world = SnowWorld()
+    private let effects = EffectWorld()
+    private let departures = WindowDepartureTracker()
     private let preferences = Preferences()
     private let updater = Updater()
     private let weather = WeatherModel()
@@ -18,9 +20,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastSpaces: [Int] = []
     private var lastFrames: [CGRect] = []
     private var lastWindowChange: CFTimeInterval = 0
+    private var lastSpaceChange: CFTimeInterval = 0
     private var lastDigest = 0
     private var lastStillDraw: CFTimeInterval = 0
     private lazy var pauseItem = item("Pause Snow", #selector(togglePause))
+    private lazy var shakeItem = item("Shake Off Snow", #selector(shakeOff))
     private lazy var modeItem: NSMenuItem = {
         let modes = NSMenu()
         modes.addItem(item("Like Outside", #selector(chooseMode(_:))))
@@ -35,6 +39,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return entry
     }()
 
+    private lazy var effectItem: NSMenuItem = {
+        let menu = NSMenu()
+        for effect in Effect.allCases {
+            let entry = item(effect.title, #selector(chooseEffect(_:)))
+            entry.representedObject = effect.rawValue
+            menu.addItem(entry)
+        }
+        let entry = NSMenuItem(title: "Effect", action: nil, keyEquivalent: "")
+        entry.submenu = menu
+        return entry
+    }()
+
+    @objc private func chooseEffect(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let effect = Effect(rawValue: raw) else { return }
+        preferences.effect = effect
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(systemSymbolName: "snowflake", accessibilityDescription: "Snowpile")
@@ -42,8 +63,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         menu.addItem(pauseItem)
+        menu.addItem(effectItem)
         menu.addItem(modeItem)
-        menu.addItem(item("Shake Off Snow", #selector(shakeOff)))
+        menu.addItem(shakeItem)
         menu.addItem(item("Build a Snowman", #selector(buildSnowman)))
         menu.addItem(.separator())
         menu.addItem(item("Settings…", #selector(showSettings), key: ","))
@@ -57,7 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rebuildOverlays()
         NotificationCenter.default.addObserver(self, selector: #selector(rebuildOverlays),
                                                name: NSApplication.didChangeScreenParametersNotification, object: nil)
-        let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in self?.poll() }
+        let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.poll() } }
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
         apply()
@@ -72,7 +94,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
-        pauseItem.title = preferences.snowing ? "Pause Snow" : "Resume Snow"
+        pauseItem.title = preferences.snowing ? "Pause Effects" : "Resume Effects"
+        modeItem.isHidden = preferences.effect != .snow
+        shakeItem.isHidden = preferences.effect != .snow
+        for entry in effectItem.submenu?.items ?? [] {
+            entry.state = entry.representedObject as? String == preferences.effect.rawValue ? .on : .off
+        }
         for entry in modeItem.submenu?.items ?? [] where entry.action != nil {
             let raw = entry.representedObject as? String
             entry.state = preferences.followWeather ? (raw == nil ? .on : .off) : (raw == preferences.mode.rawValue ? .on : .off)
@@ -90,7 +117,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func apply() {
         world.running = preferences.snowing
-        weather.follow(preferences.followWeather ? preferences.place : nil, yandexKey: preferences.yandexKey)
+        effects.effect = preferences.effect
+        effects.running = preferences.snowing
+        effects.intensity = Float(preferences.intensity)
+        effects.wind = Float(preferences.wind) * 35
+        effects.brushes = preferences.pointer
+        effects.onWindows = preferences.onWindows
+        effects.onDock = preferences.onDock
+        effects.onFloor = preferences.onFloor
+        effects.reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        weather.follow(preferences.followWeather && preferences.effect == .snow ? preferences.place : nil, yandexKey: preferences.yandexKey)
         if preferences.followWeather {
             let now = weather.conditions
             let storm = now.flatMap(SnowMode.outside)?.storm
@@ -132,8 +168,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         screens = preferences.screens()
         shownScreens = screens.map(Preferences.id(of:))
         overlays.forEach { $0.close() }
-        overlays = screens.enumerated().map { Overlay(screen: $1, index: $0, world: world) }
+        overlays = screens.enumerated().map { Overlay(screen: $1, index: $0, world: world, effects: effects) }
         world.setScreens(screens.map(\.frame))
+        effects.setScreens(screens.map(\.frame))
         poll()
     }
 
@@ -141,7 +178,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// has just moved, and a few times a second otherwise. A still scene that only fades or thaws is redrawn
     /// a few times a second; one whose windows just moved, at every poll.
     private func poll() {
-        if world.isIdle {
+        let snow = preferences.effect == .snow
+        if snow ? world.isIdle : effects.isIdle {
             overlays.forEach { $0.setActive(false) }
             return
         }
@@ -149,18 +187,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ticks += 1
         let spaces = SpaceReader.current(for: screens)
         let switched = spaces != lastSpaces
+        if switched { lastSpaceChange = now; effects.spaceChanged() }
         lastSpaces = spaces
         world.setSpaces(spaces)
         if ticks % 10 == 0 { dockFrame = DockLocator.frame() }
         if switched || NSEvent.pressedMouseButtons != 0 || now - lastWindowChange < 1 || ticks % 5 == 0 {
-            if world.settles.contains(.element) { elements.refresh(now: now) }
+            if snow && world.settles.contains(.element) { elements.refresh(now: now) }
             let windows = WindowList.current()
             let frames = windows.map(\.frame)
             if frames != lastFrames {
                 lastFrames = frames
                 lastWindowChange = now
             }
-            world.updateWindows(windows, elements: elements.elements(in: windows), dock: dockFrame, now: now)
+            let departing = departures.departing(visible: windows, switched: now - lastSpaceChange < 1, now: now)
+            world.updateWindows(windows, elements: elements.elements(in: windows), dock: dockFrame, now: now, departing: departing)
+            effects.updateWindows(windows, dock: dockFrame)
+        }
+        if !snow {
+            effects.reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            for overlay in overlays {
+                overlay.setActive(true)
+                overlay.update(animating: effects.isAnimating, fast: !effects.reduceMotion && (effects.effect == .rain || effects.effect == .starfall), changed: true)
+            }
+            return
         }
         if !world.isAnimating {
             world.step(now: now, pointer: NSEvent.mouseLocation,
@@ -196,6 +245,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func buildSnowman() {
+        preferences.effect = .snow
         world.buildSnowman()
         poll()
     }
@@ -232,7 +282,6 @@ enum WindowList {
               let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]]
         else { return [] }
         let height = primary.frame.height
-        let me = Int(getpid())
         if widgetHost.flatMap(NSRunningApplication.init(processIdentifier:)) == nil {
             widgetHost = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.notificationcenterui").first?.processIdentifier
         }
@@ -242,7 +291,6 @@ enum WindowList {
             let widget = layer.map { $0 < 0 } == true && (w[kCGWindowOwnerPID as String] as? Int).map(pid_t.init) == widgetHost
                 && !(w[kCGWindowName as String] as? String ?? "").isEmpty
             guard layer == 0 || widget,
-                  (w[kCGWindowOwnerPID as String] as? Int) != me,
                   (w[kCGWindowAlpha as String] as? Double ?? 1) > 0.05,
                   let number = w[kCGWindowNumber as String] as? Int,
                   let bounds = w[kCGWindowBounds as String] as? NSDictionary,

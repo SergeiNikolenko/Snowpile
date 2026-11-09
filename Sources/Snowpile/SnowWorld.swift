@@ -32,12 +32,22 @@ final class SnowWorld {
         var spillRight: Float = 0
         var snowmen: [Snowman] = []
         var trees: [Tree] = []
+        var velocity: SIMD2<Float> = .zero
+        var slideVelocity: Float = 0
+        var slideOffset: Float = 0
+        var agitation: Float = 0
+        var lastMotion: CFTimeInterval = 0
+        var trackedOrigin: SIMD2<Float>
+        var trackedVelocity: SIMD2<Float> = .zero
+        var previousAcceleration: SIMD2<Float> = .zero
+        var lastRelease: CFTimeInterval = 0
 
         init(key: Int, kind: Kind, left: Float, top: Float, count: Int, cap: Float, z: Int) {
             self.key = key
             self.kind = kind
             self.left = left
             self.top = top
+            self.trackedOrigin = SIMD2(left, top)
             self.columns = Array(repeating: 0, count: count)
             self.cap = cap
             self.z = z
@@ -68,8 +78,23 @@ final class SnowWorld {
 
     struct Lump {
         var x, y, vx, vy, size, seed: Float
+        var area: Float
         /// Share of the lump that settles again where it lands; brushed snow mostly blows away as powder.
         var keeps: Float = 1
+    }
+
+    struct Puff {
+        var position: SIMD2<Float>
+        var velocity: SIMD2<Float>
+        var size: Float
+        var age: Float = 0
+        var life: Float
+    }
+
+    struct Sheet {
+        var surface: Surface
+        var velocity: SIMD2<Float>
+        var age: Float = 0
     }
 
     static let columnWidth: Float = 2
@@ -114,10 +139,13 @@ final class SnowWorld {
     private var screens: [CGRect] = []
     private var flakes: [Flake] = []
     private(set) var lumps: [Lump] = []
+    private(set) var puffs: [Puff] = []
+    private(set) var sheets: [Sheet] = []
     private var byKey: [Int: Surface] = [:]
     /// Drifts of windows that left the screen (hidden, minimised, on another Space), kept until they come back.
     private var stashed: [Int: (surface: Surface, frame: CGRect, since: CFTimeInterval)] = [:]
     private var frames: [Int: CGRect] = [:]
+    private var departingWindows = Set<Int>()
     private var fronts: [CGRect] = []
     private var dock: CGRect?
     private var wind: Float = 0
@@ -147,7 +175,7 @@ final class SnowWorld {
 
     /// Whether something moves fast enough to need every display frame; falling flakes look smooth at half the rate.
     var isAnimatingFast: Bool {
-        !lumps.isEmpty || !bodies.isEmpty || held != nil || roll != nil
+        !lumps.isEmpty || !puffs.isEmpty || !sheets.isEmpty || !bodies.isEmpty || held != nil || roll != nil || surfaces.contains { abs($0.slideVelocity) > 1 }
     }
 
     /// Changes whenever anything drawn changes, so a still scene is not redrawn.
@@ -183,6 +211,11 @@ final class SnowWorld {
     func setSpaces(_ ids: [Int]) {
         defer { spaces = ids }
         guard ids.count == spaces.count else { return }
+        if ids != spaces {
+            sheets.removeAll()
+            puffs.removeAll()
+            lumps.removeAll()
+        }
         for (i, (old, new)) in zip(spaces, ids).enumerated() where old != new {
             guard let floor = byKey[-1000 - i] else { continue }
             floors["\(i):\(old)"] = floor.isBare ? nil : (floor.columns, floor.snowmen, floor.trees)
@@ -223,8 +256,11 @@ final class SnowWorld {
         updateWind(dt)
         if running && falling { spawn(dt) }
         if running { liftSnow(dt) }
+        advanceDrifts(dt)
+        advanceSheets(dt)
         advanceFlakes(dt)
         advanceLumps(dt)
+        advancePuffs(dt)
         advanceBodies(dt)
         growTrees(dt)
         sweep()
@@ -336,7 +372,11 @@ final class SnowWorld {
                 let distance = (away * away).sum().squareRoot()
                 if distance < Self.pointerReach, distance > 0.01 {
                     let near = 1 - distance / Self.pointerReach
-                    f.push += (away / distance * 700 * near * near + pointerVelocity * 2.5 * near) * dt
+                    let tangent = SIMD2(-away.y, away.x) / distance
+                    let turning: Float = pointerVelocity.x * away.y - pointerVelocity.y * away.x >= 0 ? 1 : -1
+                    let speed = min((pointerVelocity * pointerVelocity).sum().squareRoot(), 1200)
+                    f.push += (away / distance * 700 * near * near + pointerVelocity * 2.5 * near
+                               + tangent * turning * speed * near * 0.8) * dt
                 }
             }
             f.push *= exp(-2.5 * dt)
@@ -368,7 +408,10 @@ final class SnowWorld {
             l.vx *= max(0, 1 - 0.8 * dt)
             let nx = l.x + l.vx * dt, ny = l.y + l.vy * dt
             if let s = landing(x: nx, from: l.y, to: ny) {
-                deposit(on: s, x: nx, amount: l.keeps * l.size * l.size / (1.32 * Self.columnWidth))
+                deposit(on: s, x: nx, amount: l.keeps * l.area / Self.columnWidth)
+                if abs(l.vy) > 100 {
+                    powder(at: SIMD2(nx, s.top + s.height(at: nx)), velocity: SIMD2(l.vx, abs(l.vy) * 0.08), size: l.size)
+                }
                 continue
             }
             l.x = nx
@@ -398,10 +441,10 @@ final class SnowWorld {
 
     /// The highest exposed snow surface a piece crosses while moving from `y0` down to `y1` at `x`;
     /// a piece falling in `front` passes window tops.
-    private func landing(x: Float, from y0: Float, to y1: Float, front: Bool = false) -> Surface? {
+    private func landing(x: Float, from y0: Float, to y1: Float, front: Bool = false, excluding excludedKey: Int? = nil) -> Surface? {
         var best: Surface?
         var bestY = -Float.infinity
-        for s in surfaces where x >= s.left && x < s.right && settles.contains(s.kind) && !(front && s.kind == .window) {
+        for s in surfaces where s.key != excludedKey && x >= s.left && x < s.right && settles.contains(s.kind) && !(front && s.kind == .window) {
             let sy = s.top + s.height(at: x)
             if y0 >= sy, y1 < sy, sy > bestY, isExposed(s, x: x) {
                 best = s
@@ -485,7 +528,7 @@ final class SnowWorld {
     private func throwLump(x: Float, y: Float, area: Float, vx: Float, vy: Float, keeps: Float = 1) {
         guard lumps.count < 2500 else { return }
         lumps.append(Lump(x: x, y: y, vx: vx, vy: vy, size: min(max(area.squareRoot() * 1.15, 1.3), 7), seed: .random(in: 0.01...1),
-                          keeps: keeps))
+                          area: area, keeps: keeps))
     }
 
     /// Breaks the drift into lumps that fly off with the window's motion.
@@ -504,7 +547,7 @@ final class SnowWorld {
                 // The window slides out from under its snow: the snow keeps only a little of its sideways motion and falls.
                 throwLump(x: s.left + Float(j + k) * 0.5 * Self.columnWidth, y: s.top + sum / Float(k - j) * 0.5,
                           area: sum * Self.columnWidth,
-                          vx: v.x * 0.3 + .random(in: -12...12), vy: .random(in: 0...12))
+                          vx: v.x * 0.3 + .random(in: -12...12), vy: min(v.y, 0) + .random(in: 0...12))
             }
             j = k
         }
@@ -515,6 +558,116 @@ final class SnowWorld {
         s.trees = []
     }
 
+    /// A short-lived height profile preserves the connected silhouette before its fragments separate.
+    private func releaseSheet(_ s: Surface, velocity: SIMD2<Float>, share: Float = 1) {
+        guard sheets.count < 80 else { shed(s, velocity: velocity, share: share); return }
+        let sheet = Surface(key: s.key, kind: .window, left: s.left, top: s.top,
+                            count: s.columns.count, cap: s.cap, z: 0)
+        for index in s.columns.indices {
+            sheet.columns[index] = s.columns[index] * share
+            s.columns[index] -= sheet.columns[index]
+        }
+        if !sheet.isBare { sheets.append(Sheet(surface: sheet, velocity: velocity)) }
+        for man in s.snowmen { topple(man, on: s, velocity: velocity) }
+        s.snowmen.removeAll()
+        s.trees.removeAll()
+    }
+
+    private func advanceDrifts(_ dt: Float) {
+        for s in surfaces where s.kind == .window || s.kind == .element {
+            let target = SIMD2(s.left, s.top)
+            let omega: Float = 33.333333
+            let x = omega * dt
+            let decay = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x)
+            let change = s.trackedOrigin - target
+            let temporary = (s.trackedVelocity + omega * change) * dt
+            let oldVelocity = s.trackedVelocity
+            s.trackedVelocity = (oldVelocity - omega * temporary) * decay
+            s.trackedOrigin = target + (change + temporary) * decay
+            let acceleration = (s.trackedVelocity - oldVelocity) / dt
+            s.agitation *= exp(-dt / 0.3)
+            if (acceleration * s.previousAcceleration).sum() < 0 {
+                let peak = min((acceleration * acceleration).sum().squareRoot(),
+                               (s.previousAcceleration * s.previousAcceleration).sum().squareRoot())
+                s.agitation += peak / 2500
+            }
+            s.previousAcceleration = acceleration
+            let normalForce = max(0, 2500 + acceleration.y)
+            let horizontal = abs(acceleration.x)
+            if horizontal > normalForce * 3 || abs(s.slideVelocity) > 1 {
+                let direction: Float = s.slideVelocity == 0 ? (acceleration.x > 0 ? -1 : 1) : (s.slideVelocity > 0 ? 1 : -1)
+                let before = s.slideVelocity
+                s.slideVelocity += (-acceleration.x - direction * normalForce * 2) * dt
+                if before != 0, s.slideVelocity * before < 0, horizontal < normalForce * 3 { s.slideVelocity = 0 }
+            }
+            if (abs(s.slideVelocity) > 240 || s.agitation > 2.5), lastStep - s.lastRelease > 0.15, !s.isBare {
+                releaseSheet(s, velocity: s.trackedVelocity + SIMD2(s.slideVelocity, 0), share: min(0.35 + s.agitation * 0.1, 1))
+                s.lastRelease = lastStep
+                s.agitation *= 0.4
+            }
+            guard abs(s.slideVelocity) > 1 else { s.slideVelocity = 0; continue }
+            s.slideOffset += s.slideVelocity * dt
+            s.slideVelocity *= exp(-dt * 8)
+            let shift = Int(s.slideOffset / Self.columnWidth)
+            guard shift != 0 else { continue }
+            s.slideOffset -= Float(shift) * Self.columnWidth
+            let old = s.columns
+            s.columns = Array(repeating: 0, count: old.count)
+            for (index, height) in old.enumerated() {
+                let destination = index + shift
+                if old.indices.contains(destination) { s.columns[destination] = height }
+                else if height > 0.05 {
+                    throwLump(x: s.left + (Float(destination) + 0.5) * Self.columnWidth,
+                              y: s.top + height * 0.5, area: height * Self.columnWidth,
+                              vx: s.slideVelocity, vy: 0)
+                }
+            }
+        }
+    }
+
+    private func advanceSheets(_ dt: Float) {
+        var kept: [Sheet] = []
+        for var sheet in sheets {
+            let s = sheet.surface
+            let oldTop = s.top
+            sheet.age += dt
+            sheet.velocity.y -= Self.gravity * dt
+            s.left += sheet.velocity.x * dt
+            s.top += sheet.velocity.y * dt
+            for index in s.columns.indices where s.columns[index] > 0 {
+                let x = s.left + (Float(index) + 0.5) * Self.columnWidth
+                let sourceBelow = byKey[s.key].map { $0.top + $0.height(at: x) < oldTop - 1 } ?? true
+                if let hit = landing(x: x, from: oldTop + 1, to: s.top, excluding: sourceBelow ? nil : s.key) {
+                    deposit(on: hit, x: x, amount: s.columns[index])
+                    if index % 4 == 0 { powder(at: SIMD2(x, hit.top + hit.height(at: x)), velocity: SIMD2(sheet.velocity.x, 25), size: 5) }
+                    s.columns[index] = 0
+                }
+            }
+            if sheet.age >= 0.16 {
+                shed(s, velocity: sheet.velocity)
+            } else if !s.isBare {
+                kept.append(sheet)
+            }
+        }
+        sheets = kept
+    }
+
+    private func powder(at position: SIMD2<Float>, velocity: SIMD2<Float>, size: Float) {
+        for _ in 0..<min(4, max(0, 600 - puffs.count)) {
+            puffs.append(Puff(position: position, velocity: velocity * 0.25 + SIMD2(.random(in: -25...25), .random(in: 10...40)),
+                              size: max(size * 1.3, 4), life: .random(in: 0.35...0.8)))
+        }
+    }
+
+    private func advancePuffs(_ dt: Float) {
+        for index in puffs.indices {
+            puffs[index].age += dt
+            puffs[index].velocity *= exp(-3.2 * dt)
+            puffs[index].position += (puffs[index].velocity + SIMD2(wind * 0.2, 0)) * dt
+        }
+        puffs.removeAll { $0.age >= $0.life }
+    }
+
     func shakeOff() {
         for s in surfaces { shed(s, velocity: SIMD2(0, .random(in: 60...160))) }
     }
@@ -523,14 +676,24 @@ final class SnowWorld {
 
     /// `windows` runs front to back, as the window server lists them; each of the `elements` lies inside `window`.
     func updateWindows(_ windows: [(key: Int, frame: CGRect)], elements: [(key: Int, frame: CGRect, window: Int)] = [],
-                       dock newDock: CGRect?, now: CFTimeInterval) {
+                       dock newDock: CGRect?, now: CFTimeInterval, departing: Set<Int> = []) {
         let elapsed = Float(max(now - lastPoll, 0.02))
         lastPoll = now
         fronts = windows.map(\.frame)
+        let visible = Set(windows.map(\.key))
+        departingWindows.formIntersection(visible)
+        departingWindows.formUnion(departing)
+        for key in departing {
+            if let cached = stashed.removeValue(forKey: key) { releaseSheet(cached.surface, velocity: .zero) }
+            for (elementKey, cached) in stashed where cached.surface.owner == key {
+                releaseSheet(cached.surface, velocity: .zero)
+                stashed[elementKey] = nil
+            }
+        }
         dock = newDock
         var live = Set<Int>()
         var order: [Int: Int] = [:]
-        for (z, w) in windows.enumerated() {
+        for (z, w) in windows.enumerated() where !departingWindows.contains(w.key) {
             live.insert(w.key)
             order[w.key] = z
             place(key: w.key, kind: .window, frame: w.frame, cap: Self.windowCap, z: z, elapsed: elapsed)
@@ -546,7 +709,9 @@ final class SnowWorld {
             place(key: Self.dockKey, kind: .dock, frame: d, cap: Self.dockCap, z: -1, elapsed: elapsed)
         }
         for s in surfaces where s.kind != .ground && !live.contains(s.key) {
-            if let owner = s.owner, order[owner] != nil {
+            if departingWindows.contains(s.key) || s.owner.map(departingWindows.contains) == true {
+                releaseSheet(s, velocity: s.velocity * 0.25)
+            } else if let owner = s.owner, order[owner] != nil {
                 // The field moved or went away inside a window that is still there: its snow falls off.
                 shed(s, velocity: .zero)
             } else if let frame = frames[s.key], !s.isBare {
@@ -580,20 +745,42 @@ final class SnowWorld {
             }
             return
         }
-        let velocity = SIMD2(left - s.left, top - s.top) / elapsed
+        let displacement = SIMD2(left - s.left, top - s.top)
+        let velocity = displacement / elapsed
         let speed = (velocity * velocity).sum().squareRoot()
-        // A gentle move carries the snow along; a jerk or a quick drop shakes some of it loose, more the harder it is.
-        if kind == .window || kind == .element, speed > Self.carrySpeed || -velocity.y > Self.carrySpeed * 0.6 {
-            let jolt = max(speed - Self.carrySpeed, -velocity.y - Self.carrySpeed * 0.6)
-            shed(s, velocity: velocity, share: min(0.35 + jolt / 900, 1))
+        let mobile = kind == .window || kind == .element
+        if mobile, speed > 0 {
+            if velocity.y < -Self.carrySpeed * 0.6 {
+                // The support drops away. The released profile retains its old world-space height.
+                releaseSheet(s, velocity: SIMD2(s.velocity.x * 0.25, max(s.velocity.y, 0) * 0.1))
+            }
+            s.velocity = velocity
+            s.lastMotion = lastPoll
+        } else if lastPoll - s.lastMotion > 0.15 {
+            s.velocity = .zero
+        }
+        if s.columns.count != count {
+            // Keep snow at the same horizontal world coordinates when either edge is resized.
+            let old = s.columns
+            var resized = Array(repeating: Float(0), count: count)
+            for (index, height) in old.enumerated() {
+                let x = s.left + (Float(index) + 0.5) * Self.columnWidth
+                let destination = Int(floor((x - left) / Self.columnWidth))
+                if resized.indices.contains(destination) {
+                    resized[destination] += height
+                } else if height > 0.05 {
+                    throwLump(x: x, y: s.top + height * 0.5 + 1, area: height * Self.columnWidth, vx: velocity.x * 0.15, vy: 0)
+                }
+            }
+            s.columns = resized
+            for man in s.snowmen { man.x += s.left - left }
+            for index in s.trees.indices { s.trees[index].x += s.left - left }
+            for man in s.snowmen where man.x < 0 || man.x >= Float(count) * Self.columnWidth { topple(man, on: s, velocity: velocity * 0.2) }
+            s.snowmen.removeAll { $0.x < 0 || $0.x >= Float(count) * Self.columnWidth }
+            s.trees.removeAll { $0.x < 0 || $0.x >= Float(count) * Self.columnWidth }
         }
         s.left = left
         s.top = top
-        if s.columns.count > count {
-            s.columns.removeLast(s.columns.count - count)
-        } else if s.columns.count < count {
-            s.columns.append(contentsOf: repeatElement(0, count: count - s.columns.count))
-        }
         s.z = z
     }
 
@@ -608,19 +795,24 @@ final class SnowWorld {
         for l in lumps where box.contains(CGPoint(x: CGFloat(l.x), y: CGFloat(l.y))) {
             out.append(Sprite(position: SIMD2(l.x, l.y), velocity: SIMD2(l.vx, l.vy), size: l.size, alpha: 0.96, soft: 0.25, lump: l.seed))
         }
+        for puff in puffs where box.contains(CGPoint(x: CGFloat(puff.position.x), y: CGFloat(puff.position.y))) {
+            let life = max(0, 1 - puff.age / puff.life)
+            out.append(Sprite(position: puff.position, velocity: puff.velocity, size: puff.size * (1 + puff.age * 2),
+                              alpha: life * life * 0.35, soft: 1, lump: 0))
+        }
         return out
     }
 
     /// Drifts that show on `frame`, each with the rectangles (minX, minY, maxX, maxY) in front of it that hide it.
     func drifts(in frame: CGRect) -> [(surface: Surface, occluders: [SIMD4<Float>])] {
-        surfaces.compactMap { s in
+        (surfaces + sheets.map(\.surface)).compactMap { s in
             let box = CGRect(x: CGFloat(s.left) - 2, y: CGFloat(s.top) - 2, width: CGFloat(s.width) + 4, height: CGFloat(s.cap) + 4)
             guard box.intersects(frame), !s.isBare else { return nil }
             var rects: [CGRect] = []
             switch s.kind {
             case .dock: break
             case .ground: rects = dock.map { [$0] } ?? []
-            case .window, .element: rects = Array(fronts.prefix(s.z)) + (dock.map { [$0] } ?? [])
+            case .window, .element: rects = Array(fronts.prefix(max(s.z, 0))) + (dock.map { [$0] } ?? [])
             }
             let occluders = rects.filter { $0.intersects(box) }
                 .map { SIMD4(Float($0.minX), Float($0.minY), Float($0.maxX), Float($0.maxY)) }

@@ -24,6 +24,7 @@ final class SnowGPU {
     let sprites: MTLRenderPipelineState
     let drifts: MTLRenderPipelineState
     let parts: MTLRenderPipelineState
+    let effects: MTLRenderPipelineState
 
     private init() {
         let device = MTLCreateSystemDefaultDevice()!
@@ -46,6 +47,7 @@ final class SnowGPU {
         sprites = pipeline("pieceVertex", "pieceFragment")
         drifts = pipeline("driftVertex", "driftFragment")
         parts = pipeline("partVertex", "partFragment")
+        effects = pipeline("effectVertex", "effectFragment")
     }
 }
 
@@ -68,10 +70,12 @@ final class Overlay: NSObject, MTKViewDelegate {
     private let window: NSPanel
     private let view: SnowView
     private unowned let world: SnowWorld
+    private let effects: EffectWorld?
     private var shown = false
     private var animating = false
 
-    init(screen: NSScreen, index: Int, world: SnowWorld) {
+    init(screen: NSScreen, index: Int, world: SnowWorld, effects: EffectWorld? = nil) {
+        self.effects = effects
         self.index = index
         self.frame = screen.frame
         self.scale = screen.backingScaleFactor
@@ -123,7 +127,7 @@ final class Overlay: NSObject, MTKViewDelegate {
     func update(animating moving: Bool, fast: Bool, changed: Bool) {
         guard shown else { return }
         let mouse = NSEvent.mouseLocation
-        let catches = frame.contains(mouse) && world.wantsClick(at: mouse)
+        let catches = (effects?.effect ?? .snow) == .snow && frame.contains(mouse) && world.wantsClick(at: mouse)
         if window.ignoresMouseEvents == catches { window.ignoresMouseEvents = !catches }
         let stopped = animating && !moving
         animating = moving
@@ -137,10 +141,14 @@ final class Overlay: NSObject, MTKViewDelegate {
 
     func draw(in view: MTKView) {
         let now = CACurrentMediaTime()
-        // While the display loop runs, the first screen's overlay moves the snow on; otherwise the poll does.
+        // Advance once per display frame, shared by every screen's overlay.
         if index == 0, animating {
-            world.step(now: now, pointer: NSEvent.mouseLocation,
-                       rolling: NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask) == .option)
+            if let effects, effects.effect != .snow {
+                effects.step(now: now, pointer: NSEvent.mouseLocation)
+            } else {
+                world.step(now: now, pointer: NSEvent.mouseLocation,
+                           rolling: NSEvent.modifierFlags.intersection(.deviceIndependentFlagsMask) == .option)
+            }
         }
         let gpu = SnowGPU.shared
         guard let pass = view.currentRenderPassDescriptor, let drawable = view.currentDrawable,
@@ -150,6 +158,21 @@ final class Overlay: NSObject, MTKViewDelegate {
                                   origin: SIMD2(Float(frame.minX), Float(frame.minY)),
                                   scale: Float(scale), time: Float(now - world.start))
         let sceneLength = MemoryLayout<SceneUniforms>.stride
+
+        if let effects, effects.effect != .snow {
+            let sprites = effects.sprites(screen: index, frame: frame)
+            if !sprites.isEmpty {
+                let buffer = gpu.device.makeBuffer(bytes: sprites, length: sprites.count * MemoryLayout<EffectSprite>.stride)!
+                encoder.setRenderPipelineState(gpu.effects)
+                encoder.setVertexBuffer(buffer, offset: 0, index: 0)
+                encoder.setVertexBytes(&scene, length: sceneLength, index: 1)
+                encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6, instanceCount: sprites.count)
+            }
+            encoder.endEncoding()
+            commands.present(drawable)
+            commands.commit()
+            return
+        }
 
         let trees = world.trees(in: frame)
         if !trees.isEmpty {

@@ -9,6 +9,7 @@ final class Preferences: ObservableObject {
     private let defaults = UserDefaults.standard
     var onChange: () -> Void = {}
 
+    @Published var effect: Effect { didSet { save(effect.rawValue, "effect") } }
     @Published var snowing: Bool { didSet { save(snowing, "snowing") } }
     @Published var intensity: Double { didSet { save(intensity, "intensity") } }
     @Published var wind: Double { didSet { save(wind, "wind") } }
@@ -29,6 +30,7 @@ final class Preferences: ObservableObject {
             "onWindows": true, "onDock": true, "onFloor": true, "pointer": true,
             "followWeather": false, "yandexKey": "", "mode": SnowMode.snow.rawValue,
         ])
+        effect = Effect(rawValue: defaults.string(forKey: "effect") ?? "") ?? .snow
         snowing = defaults.bool(forKey: "snowing")
         intensity = defaults.double(forKey: "intensity")
         wind = defaults.double(forKey: "wind")

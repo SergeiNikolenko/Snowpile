@@ -13,34 +13,44 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section {
-                Toggle("Snow", isOn: $preferences.snowing)
-                Picker("Snowfall", selection: $preferences.followWeather) {
-                    Text("Always").tag(false)
-                    Text("Like Outside").tag(true)
+                Toggle("Effects", isOn: $preferences.snowing)
+                Picker("Effect", selection: $preferences.effect) {
+                    ForEach(Effect.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
-                .pickerStyle(.segmented)
-                if preferences.followWeather {
-                    LabeledContent("Region") {
-                        Button(preferences.place.name) { choosingPlace = true }
-                            .popover(isPresented: $choosingPlace, arrowEdge: .trailing) {
-                                PlacePicker { place in
-                                    preferences.place = place
-                                    choosingPlace = false
+                if preferences.effect == .snow {
+                    Picker("Snowfall", selection: $preferences.followWeather) {
+                        Text("Always").tag(false)
+                        Text("Like Outside").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    if preferences.followWeather {
+                        LabeledContent("Region") {
+                            Button(preferences.place.name) { choosingPlace = true }
+                                .popover(isPresented: $choosingPlace, arrowEdge: .trailing) {
+                                    PlacePicker { place in
+                                        preferences.place = place
+                                        choosingPlace = false
+                                    }
                                 }
-                            }
+                        }
+                        if let now = weather.conditions {
+                            LabeledContent("Now", value: describe(now))
+                        } else if weather.failed {
+                            LabeledContent("Now", value: preferences.yandexKey.isEmpty ? "No connection" : "Key not accepted")
+                        }
+                        TextField("Yandex Weather Key", text: $preferences.yandexKey, prompt: Text("Paste key"))
+                    } else {
+                        Picker("Mode", selection: $preferences.mode) {
+                            ForEach(SnowMode.allCases) { Text($0.title).tag($0) }
+                        }
+                        if preferences.mode == .custom {
+                            Slider(value: $preferences.intensity, in: 0.3...3) { Text("Intensity") }
+                            Slider(value: $preferences.wind, in: 0...2.5) { Text("Wind") }
+                        }
                     }
-                    if let now = weather.conditions {
-                        LabeledContent("Now", value: describe(now))
-                    } else if weather.failed {
-                        LabeledContent("Now", value: preferences.yandexKey.isEmpty ? "No connection" : "Key not accepted")
-                    }
-                    TextField("Yandex Weather Key", text: $preferences.yandexKey, prompt: Text("Paste key"))
                 } else {
-                    Picker("Mode", selection: $preferences.mode) {
-                        ForEach(SnowMode.allCases) { Text($0.title).tag($0) }
-                    }
-                    if preferences.mode == .custom {
-                        Slider(value: $preferences.intensity, in: 0.3...3) { Text("Intensity") }
+                    Slider(value: $preferences.intensity, in: 0.3...3) { Text("Intensity") }
+                    if preferences.effect != .starfall {
                         Slider(value: $preferences.wind, in: 0...2.5) { Text("Wind") }
                     }
                 }
@@ -55,22 +65,24 @@ struct SettingsView: View {
                     }
                 }
             }
-            Section("Settles On") {
-                Toggle("Windows", isOn: $preferences.onWindows)
-                if dockAllowed {
-                    Toggle("Dock", isOn: $preferences.onDock)
-                } else {
-                    LabeledContent("Dock") {
-                        Button("Allow…") {
-                            let prompt = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-                            dockAllowed = AXIsProcessTrustedWithOptions([prompt: true] as CFDictionary)
+            if [.snow, .rain, .sakura, .leaves].contains(preferences.effect) {
+                Section("Settles On") {
+                    Toggle("Windows", isOn: $preferences.onWindows)
+                    if dockAllowed {
+                        Toggle("Dock", isOn: $preferences.onDock)
+                    } else {
+                        LabeledContent("Dock") {
+                            Button("Allow…") {
+                                let prompt = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+                                dockAllowed = AXIsProcessTrustedWithOptions([prompt: true] as CFDictionary)
+                            }
                         }
                     }
+                    Toggle("Bottom of Screen", isOn: $preferences.onFloor)
                 }
-                Toggle("Bottom of Screen", isOn: $preferences.onFloor)
             }
             Section {
-                Toggle("Brush Snow with Pointer", isOn: $preferences.pointer)
+                Toggle("Interact with Pointer", isOn: $preferences.pointer)
                 Toggle("Open at Login", isOn: Binding(get: { preferences.opensAtLogin }, set: preferences.setOpensAtLogin))
             }
             Section {
