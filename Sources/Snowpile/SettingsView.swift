@@ -45,6 +45,18 @@ struct SettingsView: View {
                             .labelsHidden().toggleStyle(.switch).controlSize(.small)
                     }
                 }
+                if !preferences.snowing, preferences.pausedUntil != nil {
+                    GridRow {
+                        Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])
+                        TimelineView(.periodic(from: .now, by: 30)) { context in
+                            if let pauseStatus = preferences.pauseStatusSummary(now: context.date) {
+                                Text(pauseStatus)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
                 if preferences.followWeather {
                     GridRow {
                         Text("City")

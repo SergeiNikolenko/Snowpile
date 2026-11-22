@@ -1,6 +1,6 @@
 # Snowpile
 
-Snow for your Mac. Flakes drift down over everything, pile up on the tops of your windows, on text fields inside them, on desktop widgets, on the Dock and along the bottom of the screen, and brush aside as your pointer passes through. Move a window gently and the snow rides along; jerk it and the snow shakes loose. Each Space keeps its own snow.
+Snow for your Mac. Flakes drift down across all displays and Spaces, pile up in wind-sculpted drifts on the tops of your windows, on rounded URL bars, composers, cards and message bubbles inside them, on desktop widgets, on the Dock and along the bottom of the screen, and stay clear of readable text blocks and floating panels so they don't get in the way of work. Move a window gently and the snow rides along; jerk it and the snow shakes loose. Each Space keeps its own snow.
 
 Snow slides with inertia when a window accelerates, and repeated shaking loosens more of the drift. Lower a window quickly and its snow briefly hangs in the air before falling back. Closing or minimizing a window drops its drift; narrowing one sheds the overhanging edge. Falling sheets break into clumps and powder, while fast flakes leave short trails and swirl around the pointer.
 
@@ -8,11 +8,11 @@ The **Effect** menu also offers rain with splashes and occasional lightning, tum
 
 Hold **Option** and move the pointer along a drift to roll a snowball; it picks snow up and grows as it goes. Let go of Option to set it down. Roll the next ball up to it and it goes on top: two or three balls make a snowman, with a carrot nose, coal eyes and buttons, and twig arms. Snowmen ride along on windows you move gently, fall apart when you jerk the window or swipe through them, and melt when the snow stops or it thaws. **Build a Snowman** in the menu puts a ready one at the bottom of the screen.
 
-Click a drift to scoop up a snowball, or click a snowman to pick the whole thing up, and throw it with a flick. Thrown snow flies under gravity, splats against the sides of windows and the Dock, and knocks over the snowman it hits, ball by ball depending on where it lands. A hard landing bursts a snowball back into loose snow.
+Click a drift to scoop up a snowball, or click a snowman to pick the whole thing up, and throw it with a flick. Thrown snow flies under gravity, splats and shatters snowmen against window edges, the Dock, and the sides of the screen, and knocks over the snowman it hits, ball by ball depending on where it lands. A hard landing bursts a snowball back into loose snow.
 
-Where snow drifts deep, little fir trees grow out of it; they sink back as the drift goes.
+Where snow drifts deep, little fir trees grow out of it and snowmen appear naturally in the snowbanks; trees sink back as the drift goes.
 
-Snowpile lives in the menu bar. From the snowflake you can select or pause an effect, shake off snow, open Settings and check for updates.
+Snowpile lives in the menu bar. From the snowflake you can select or pause an effect (indefinitely or for a set duration like 15 minutes, 1 hour, 2 hours, or until tomorrow), shake off snow, open Settings and check for updates.
 
 ## Install
 
@@ -20,7 +20,7 @@ Download `Snowpile-<version>.dmg` from the [latest release](https://github.com/S
 
 Snowpile is not notarized by Apple yet, so the first launch needs one extra step: open it, then go to System Settings → Privacy & Security and click **Open Anyway**. After that it updates itself.
 
-To let snow settle on the Dock and on text fields inside windows, and detect minimized windows, allow Snowpile in System Settings → Privacy & Security → Accessibility (Settings → General → Allow Accessibility… takes you there). It reads window minimization state, Dock geometry, and text-field geometry in the app in front.
+To let snow settle on the Dock and on input boxes, cards and message bubbles inside visible apps (including browsers and Electron/Codex windows), keep flakes out of readable text blocks and panels, and detect minimized windows, allow Snowpile in System Settings → Privacy & Security → Accessibility (Settings → General → Allow Accessibility… takes you there).
 
 ## Settings
 

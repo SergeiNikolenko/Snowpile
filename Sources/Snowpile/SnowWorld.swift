@@ -23,11 +23,15 @@ final class SnowWorld {
         var left: Float
         var top: Float
         var columns: [Float]
+        var heapProfile: [Float] = []
+        var capacityProfile: [Float] = []
         let cap: Float
         /// Position in the window stack, 0 being the frontmost window.
         var z: Int
         /// The window an element lies in.
         var owner: Int?
+        /// Visual height of the element's body (used to distinguish tall solid panels from thin bars/bubbles).
+        var bodyHeight: Float = 0
         var spillLeft: Float = 0
         var spillRight: Float = 0
         var snowmen: [Snowman] = []
@@ -98,8 +102,8 @@ final class SnowWorld {
     }
 
     static let columnWidth: Float = 2
-    private static let repose: Float = 0.75
-    private static let edgeRepose: Float = 2.4
+    private static let repose: Float = 0.52
+    private static let edgeRepose: Float = 0.65
     private static let gravity: Float = 820
     private static let dockKey = -1
     private static let windowCap: Float = 18
@@ -109,7 +113,9 @@ final class SnowWorld {
     private static let cornerInset: Float = 10
     private static let elementInset: Float = 4
     /// Share of the settling flakes that fall in front of windows.
-    private static let frontShare: Float = 0.35
+    private static let frontShare: Float = 0.50
+    /// Share of front flakes caught by compact inside-window bars/bubbles so lower bubbles and composers still receive snow.
+    private static let compactElementCatch: Float = 0.45
     private static let pointerReach: Float = 80
     private static let broomReach: Float = 12
     /// Settled snow slowly packs down and blows away: this share of a drift goes per second, plus a thin layer.
@@ -137,6 +143,7 @@ final class SnowWorld {
 
     private(set) var surfaces: [Surface] = []
     private var screens: [CGRect] = []
+    private var visibleScreens: [CGRect] = []
     private var flakes: [Flake] = []
     private(set) var lumps: [Lump] = []
     private(set) var puffs: [Puff] = []
@@ -147,6 +154,7 @@ final class SnowWorld {
     private var frames: [Int: CGRect] = [:]
     private var departingWindows = Set<Int>()
     private var fronts: [CGRect] = []
+    private var visibleContentOccluders: [(frame: CGRect, isSurfaceBody: Bool, window: Int)] = []
     private var dock: CGRect?
     private var wind: Float = 0
     private var windTarget: Float = 0
@@ -163,6 +171,7 @@ final class SnowWorld {
     private var held: Held?
     private(set) var bodies: [Body] = []
     private var treeClock: Float = 0
+    private var snowmanClock: Float = 3
     private var pointer: SIMD2<Float>?
     private var pointerVelocity: SIMD2<Float> = .zero
 
@@ -204,6 +213,12 @@ final class SnowWorld {
             h.combine(r.width)
             h.combine(r.height)
         }
+        for occ in visibleContentOccluders {
+            h.combine(occ.frame.minX)
+            h.combine(occ.frame.minY)
+            h.combine(occ.frame.width)
+            h.combine(occ.frame.height)
+        }
         return h.finalize()
     }
 
@@ -228,10 +243,11 @@ final class SnowWorld {
 
     /// Screens whose frame is unchanged keep their floor, so plugging in a display or a spurious
     /// screen-change notification does not wipe the snow.
-    func setScreens(_ frames: [CGRect]) {
+    func setScreens(_ frames: [CGRect], visible: [CGRect]? = nil) {
         let kept = Set(frames.indices.filter { $0 < screens.count && screens[$0] == frames[$0] })
         if frames.count != screens.count { spaces = [] }
         screens = frames
+        visibleScreens = (visible?.count == frames.count ? visible : nil) ?? frames
         floors = floors.filter { key, _ in Int(key.prefix { $0 != ":" }).map(kept.contains) ?? false }
         spawnDebt = Array(repeating: 0, count: frames.count)
         flakes.removeAll { $0.screen >= frames.count }
@@ -263,6 +279,7 @@ final class SnowWorld {
         advancePuffs(dt)
         advanceBodies(dt)
         growTrees(dt)
+        spawnSnowmen(dt)
         sweep()
         melt(dt)
     }
@@ -314,11 +331,18 @@ final class SnowWorld {
     }
 
     private func spawn(_ dt: Float) {
+        guard !screens.isEmpty else { return }
+        let totalCap = max(5000, screens.count * 3500)
+        var perScreenCounts = Array(repeating: 0, count: screens.count)
+        for f in flakes where perScreenCounts.indices.contains(f.screen) {
+            perScreenCounts[f.screen] += 1
+        }
         for (i, screen) in screens.enumerated() {
+            let screenCap = max(1600, Int(3000 * Float(screen.width) / 1440))
             spawnDebt[i] += 40 * intensity * Float(screen.width) / 1000 * dt
             while spawnDebt[i] >= 1 {
                 spawnDebt[i] -= 1
-                guard flakes.count < 5000 else { continue }
+                guard flakes.count < totalCap, perScreenCounts[i] < screenCap else { continue }
                 let depth = pow(Float.random(in: 0...1), 1.6)
                 // In a strong wind most snow arrives from the side it blows from, not only from the top.
                 let sideways = Float.random(in: 0...1) < min(abs(wind) / 150, 0.7)
@@ -331,6 +355,7 @@ final class SnowWorld {
                     sway: .random(in: 6...18), swayRate: .random(in: 0.6...1.8), phase: .random(in: 0...(2 * .pi)),
                     size: (1.2 + 3.4 * depth) * flakeScale, alpha: 0.35 + 0.6 * depth, soft: 1 - 0.6 * depth,
                     lands: depth > 0.3, front: .random(in: 0...1) < Self.frontShare, screen: i))
+                perScreenCounts[i] += 1
             }
         }
     }
@@ -344,7 +369,7 @@ final class SnowWorld {
         liftDebt += strength * 60 * Float(snowy.count) * dt
         while liftDebt >= 1 {
             liftDebt -= 1
-            guard flakes.count < 5000, let s = snowy.randomElement() else { continue }
+            guard flakes.count < max(5000, screens.count * 3500), let s = snowy.randomElement() else { continue }
             let j = Int.random(in: s.columns.indices)
             guard s.columns[j] > 0.3 else { continue }
             let x = s.left + (Float(j) + 0.5) * Self.columnWidth
@@ -363,6 +388,8 @@ final class SnowWorld {
     }
 
     private func advanceFlakes(_ dt: Float) {
+        let globalMinX = Float(screens.map(\.minX).min() ?? 0) - 160
+        let globalMaxX = Float(screens.map(\.maxX).max() ?? 0) + 160
         var kept: [Flake] = []
         kept.reserveCapacity(flakes.count)
         for var f in flakes {
@@ -375,8 +402,10 @@ final class SnowWorld {
                     let tangent = SIMD2(-away.y, away.x) / distance
                     let turning: Float = pointerVelocity.x * away.y - pointerVelocity.y * away.x >= 0 ? 1 : -1
                     let speed = min((pointerVelocity * pointerVelocity).sum().squareRoot(), 1200)
-                    f.push += (away / distance * 700 * near * near + pointerVelocity * 2.5 * near
-                               + tangent * turning * speed * near * 0.8) * dt
+                    let radial = (away / distance) * (700 * near * near)
+                    let drag = pointerVelocity * (2.5 * near)
+                    let swirl = tangent * (turning * speed * near * 0.8)
+                    f.push += (radial + drag + swirl) * dt
                 }
             }
             f.push *= exp(-2.5 * dt)
@@ -386,18 +415,45 @@ final class SnowWorld {
             f.vy = -f.fall + f.push.y
             let nx = f.x + f.vx * dt, ny = f.y + f.vy * dt
             if f.lands, let s = landing(x: nx, from: f.y, to: ny, front: f.front) {
-                // Window tops miss the flakes falling in front, so the rest settle a little heavier there and the drifts grow as before.
-                let share: Float = s.kind == .window ? 1 / (1 - Self.frontShare) : 1
-                deposit(on: s, x: nx, amount: share * 0.3 * f.size / 2.5 * (0.3 + 1.4 * heap(s, x: nx)))
+                let isCompactElement = s.kind == .element && s.bodyHeight < 136
+                let catchRate: Float = isCompactElement ? Self.compactElementCatch : 1
+                if catchRate >= 1 || Float.random(in: 0...1) < catchRate {
+                let share: Float
+                switch s.kind {
+                case .window: share = 1 / (1 - Self.frontShare)
+                case .element: share = 1 / (Self.frontShare * catchRate)
+                case .dock, .ground: share = 1
+                }
+                deposit(on: s, x: nx, amount: share * 0.32 * f.size / 2.5 * (0.62 + 0.76 * heap(s, x: nx)))
+                continue
+                }
+            }
+            // Tall card/panel bodies physically block all flakes; decorative non-landing flakes also stop at text blocks.
+            // All text blocks and card bodies additionally discard every sprite pixel in the GPU shader.
+            if hitsBlockingOccluder(x: nx, y: ny, lands: f.lands) {
                 continue
             }
             f.x = nx
             f.y = ny
+            let point = CGPoint(x: CGFloat(nx), y: CGFloat(ny))
+            if !screens[f.screen].contains(point), let nextScreen = screens.firstIndex(where: { $0.contains(point) }) {
+                f.screen = nextScreen
+            }
             let bounds = screens[f.screen]
-            if ny < Float(bounds.minY) - 8 || nx < Float(bounds.minX) - 160 || nx > Float(bounds.maxX) + 160 { continue }
+            if ny < Float(bounds.minY) - 8 || nx < globalMinX || nx > globalMaxX { continue }
             kept.append(f)
         }
         flakes = kept
+    }
+
+    private func hitsBlockingOccluder(x: Float, y: Float, lands: Bool) -> Bool {
+        guard !visibleContentOccluders.isEmpty else { return false }
+        let p = CGPoint(x: CGFloat(x), y: CGFloat(y))
+        return visibleContentOccluders.contains { occ in
+            guard occ.frame.contains(p) else { return false }
+            if !lands { return true }
+            return occ.isSurfaceBody && occ.frame.height >= 136
+        }
     }
 
     private func advanceLumps(_ dt: Float) {
@@ -470,17 +526,29 @@ final class SnowWorld {
     private func deposit(on s: Surface, x: Float, amount: Float) {
         let i = Int(((x - s.left) / Self.columnWidth).rounded(.down))
         guard s.columns.indices.contains(i) else { return }
-        s.columns[i] += amount * 0.5
-        s.columns[i > 0 ? i - 1 : i] += amount * 0.25
-        s.columns[i + 1 < s.columns.count ? i + 1 : i] += amount * 0.25
+        // Spread each flake over a soft wind-biased Gaussian footprint so drifts coalesce smoothly.
+        let n = s.columns.count
+        let bias = min(max(wind / 220, -0.35), 0.35)
+        let weights: [(Int, Float)] = [
+            (-2, 0.09 - bias * 0.04),
+            (-1, 0.22 - bias * 0.08),
+            (0, 0.38),
+            (1, 0.22 + bias * 0.08),
+            (2, 0.09 + bias * 0.04),
+        ]
+        for (offset, w) in weights {
+            let idx = min(max(i + offset, 0), n - 1)
+            s.columns[idx] += amount * w
+        }
         settle(s, around: i)
     }
 
     /// Slides snow down any slope steeper than the angle of repose; over a window's open ends it spills off as lumps.
     private func settle(_ s: Surface, around i: Int) {
+        ensureProfiles(s)
         let n = s.columns.count
-        let lo = max(0, i - 12), hi = min(n - 1, i + 12)
-        for _ in 0..<4 {
+        let lo = max(0, i - 14), hi = min(n - 1, i + 14)
+        for _ in 0..<5 {
             for j in lo..<hi {
                 let d = s.columns[j] - s.columns[j + 1]
                 let excess = abs(d) - Self.repose
@@ -505,8 +573,7 @@ final class SnowWorld {
             }
         }
         for j in lo...hi {
-            let x = s.left + (Float(j) + 0.5) * Self.columnWidth
-            s.columns[j] = min(s.columns[j], s.cap * (0.45 + 0.55 * heap(s, x: x)))
+            s.columns[j] = min(s.columns[j], s.capacityProfile[j])
         }
         if s.spillLeft > 1.5 {
             throwLump(x: s.left - 1.5, y: s.top + 1, area: s.spillLeft * Self.columnWidth, vx: -.random(in: 6...24), vy: 0)
@@ -518,11 +585,44 @@ final class SnowWorld {
         }
     }
 
-    /// 0...1 along a surface: where the wind tends to heap snow up. Fixed per surface so mounds grow in place.
+    /// 0...1 along a surface: organic multi-scale wind-sculpted dune profile with smooth rounded end tapers.
     private func heap(_ s: Surface, x: Float) -> Float {
-        let u = x - s.left
-        let seed = Float(abs(s.key) % 997)
-        return 0.5 + 0.3 * sin(u * 0.045 + seed) + 0.2 * sin(u * 0.013 + seed * 0.7)
+        ensureProfiles(s)
+        let i = min(max(Int(((x - s.left) / Self.columnWidth).rounded(.down)), 0), s.heapProfile.count - 1)
+        return s.heapProfile[i]
+    }
+
+    private func ensureProfiles(_ s: Surface) {
+        let n = s.columns.count
+        guard s.capacityProfile.count != n else { return }
+        var hProf = [Float](repeating: 0, count: n)
+        var cProf = [Float](repeating: 0, count: n)
+        let width = max(s.width, 1)
+        let seed = Float(abs(s.key) % 997) * 0.731
+        let taperWidth = min(18, width * 0.22)
+        for j in 0..<n {
+            let u = (Float(j) + 0.5) * Self.columnWidth
+            let a1 = u * 0.011 + seed
+            let a2 = u * 0.029 + seed * 1.7 + 1.3
+            let a3 = u * 0.071 + seed * 2.9 + 2.7
+            let w1 = sin(a1 + 0.35 * sin(a1))
+            let w2 = sin(a2 - 0.25 * sin(a2))
+            let w3 = sin(a3)
+            let base = min(max(0.52 + 0.24 * w1 + 0.14 * w2 + 0.07 * w3, 0.15), 1.0)
+            let h: Float
+            if s.kind == .ground {
+                h = base
+            } else {
+                let edge = min(u, width - u)
+                let t = min(max(edge / max(taperWidth, 1), 0), 1)
+                let envelope = t * t * (3 - 2 * t)
+                h = base * (0.25 + 0.75 * envelope)
+            }
+            hProf[j] = h
+            cProf[j] = s.cap * (0.35 + 0.65 * h)
+        }
+        s.heapProfile = hProf
+        s.capacityProfile = cProf
     }
 
     private func throwLump(x: Float, y: Float, area: Float, vx: Float, vy: Float, keeps: Float = 1) {
@@ -574,6 +674,31 @@ final class SnowWorld {
     }
 
     private func advanceDrifts(_ dt: Float) {
+        // Subtle wind-driven creep gently sculpts exposed drifts downwind into realistic asymmetric snowbanks.
+        if running, abs(wind) > 18 {
+            let dir = wind > 0 ? 1 : -1
+            let creep = min(abs(wind) / 140, 1) * 0.12 * dt
+            for s in surfaces where settles.contains(s.kind) && s.columns.count > 4 && !s.isBare {
+                ensureProfiles(s)
+                let n = s.columns.count
+                var j = dir > 0 ? n - 2 : 1
+                let end = dir > 0 ? -1 : n
+                let step = dir > 0 ? -1 : 1
+                while j != end {
+                    let src = s.columns[j]
+                    if src > 0.8 {
+                        let dst = j + dir
+                        let room = s.capacityProfile[dst] - s.columns[dst]
+                        if room > 0.05 {
+                            let move = min(src * creep, room * 0.5)
+                            s.columns[j] -= move
+                            s.columns[dst] += move
+                        }
+                    }
+                    j += step
+                }
+            }
+        }
         for s in surfaces where s.kind == .window || s.kind == .element {
             let target = SIMD2(s.left, s.top)
             let omega: Float = 33.333333
@@ -676,6 +801,7 @@ final class SnowWorld {
 
     /// `windows` runs front to back, as the window server lists them; each of the `elements` lies inside `window`.
     func updateWindows(_ windows: [(key: Int, frame: CGRect)], elements: [(key: Int, frame: CGRect, window: Int)] = [],
+                       occluders: [ElementLocator.ContentOccluder] = [],
                        dock newDock: CGRect?, now: CFTimeInterval, departing: Set<Int> = []) {
         let elapsed = Float(max(now - lastPoll, 0.02))
         lastPoll = now
@@ -701,9 +827,33 @@ final class SnowWorld {
         for e in elements {
             guard let z = order[e.window] else { continue }
             live.insert(e.key)
-            place(key: e.key, kind: .element, frame: e.frame, cap: Self.windowCap, z: z, elapsed: elapsed)
+            let cap = min(Self.windowCap, max(10, Float(e.frame.height) * 0.35))
+            place(key: e.key, kind: .element, frame: e.frame, cap: cap, z: z, elapsed: elapsed)
             byKey[e.key]?.owner = e.window
+            byKey[e.key]?.bodyHeight = Float(e.frame.height)
         }
+        var rawOccluders: [(window: Int, z: Int, frame: CGRect, isSurfaceBody: Bool)] = []
+        for occ in occluders {
+            guard let z = order[occ.window], occ.frame.width >= 8, occ.frame.height >= 6 else { continue }
+            rawOccluders.append((occ.window, z, occ.frame, occ.isSurfaceBody))
+        }
+        // Ensure every element card body also acts as a solid occluder even when explicit occluders were not supplied.
+        for e in elements {
+            guard let z = order[e.window], e.frame.width >= 56, e.frame.height >= 24 else { continue }
+            let body = CGRect(x: e.frame.minX, y: e.frame.minY, width: e.frame.width, height: max(1, e.frame.height - 2))
+            let covered = rawOccluders.contains { $0.window == e.window && $0.isSurfaceBody && $0.frame.insetBy(dx: -4, dy: -4).contains(body) }
+            if !covered {
+                rawOccluders.append((e.window, z, body, true))
+            }
+        }
+        var exposedOccluders: [(frame: CGRect, isSurfaceBody: Bool, window: Int)] = []
+        for occ in rawOccluders {
+            let blocking = Array(fronts.prefix(occ.z)) + (newDock.map { [$0] } ?? [])
+            for piece in subtractRects(occ.frame, blocking: blocking) {
+                exposedOccluders.append((piece, occ.isSurfaceBody, occ.window))
+            }
+        }
+        visibleContentOccluders = exposedOccluders
         if let d = newDock {
             live.insert(Self.dockKey)
             place(key: Self.dockKey, kind: .dock, frame: d, cap: Self.dockCap, z: -1, elapsed: elapsed)
@@ -730,8 +880,12 @@ final class SnowWorld {
         let left = Float(frame.minX) + inset
         var top = Float(frame.maxY)
         // A full-screen or maximised window has no room above it, so its snow lies along its top inside the screen.
-        if kind == .window, let roof = screens.first(where: { $0.minX <= frame.midX && frame.midX < $0.maxX && $0.minY < frame.maxY && frame.maxY <= $0.maxY + 1 })?.maxY {
-            top = min(top, Float(roof) - cap)
+        if kind == .window,
+           let idx = screens.firstIndex(where: { $0.minX <= frame.midX && frame.midX < $0.maxX && $0.minY < frame.maxY && frame.maxY <= $0.maxY + 1 }) {
+            let screenTop = screens[idx].maxY
+            if frame.maxY > screenTop - CGFloat(cap) {
+                top = min(top, Float(screenTop) - cap)
+            }
         }
         let count = max(1, Int((Float(frame.width) - 2 * inset) / Self.columnWidth))
         frames[key] = frame
@@ -788,7 +942,8 @@ final class SnowWorld {
 
     func sprites(screen index: Int, frame: CGRect) -> [Sprite] {
         var out: [Sprite] = []
-        for f in flakes where f.screen == index {
+        let flakeBox = frame.insetBy(dx: -20, dy: -20)
+        for f in flakes where flakeBox.contains(CGPoint(x: CGFloat(f.x), y: CGFloat(f.y))) {
             out.append(Sprite(position: SIMD2(f.x, f.y), velocity: SIMD2(f.vx, f.vy), size: f.size, alpha: f.alpha, soft: f.soft, lump: 0))
         }
         let box = frame.insetBy(dx: -10, dy: -10)
@@ -803,6 +958,42 @@ final class SnowWorld {
         return out
     }
 
+    /// Visible content occluders (text blocks + card bodies) on `frame`, used by the sprite shader so no flake pixels
+    /// ever draw over readable text or inside floating cards.
+    func flakeOccluders(in frame: CGRect) -> [SIMD4<Float>] {
+        let box = frame.insetBy(dx: -12, dy: -12)
+        return visibleContentOccluders
+            .filter { $0.frame.intersects(box) }
+            .prefix(96)
+            .map { SIMD4(Float($0.frame.minX), Float($0.frame.minY), Float($0.frame.maxX), Float($0.frame.maxY)) }
+    }
+
+    /// Splits `rect` into exposed sub-rectangles outside `blocking` windows.
+    private func subtractRects(_ rect: CGRect, blocking: [CGRect]) -> [CGRect] {
+        var pieces = [rect]
+        for block in blocking {
+            var next: [CGRect] = []
+            for r in pieces {
+                let hit = r.intersection(block)
+                if hit.isNull || hit.width < 1 || hit.height < 1 {
+                    next.append(r)
+                    continue
+                }
+                // Top strip above blocker
+                if r.maxY > hit.maxY + 4 { next.append(CGRect(x: r.minX, y: hit.maxY, width: r.width, height: r.maxY - hit.maxY)) }
+                // Bottom strip below blocker
+                if hit.minY > r.minY + 4 { next.append(CGRect(x: r.minX, y: r.minY, width: r.width, height: hit.minY - r.minY)) }
+                // Left strip beside blocker
+                if hit.minX > r.minX + 6 { next.append(CGRect(x: r.minX, y: hit.minY, width: hit.minX - r.minX, height: hit.height)) }
+                // Right strip beside blocker
+                if r.maxX > hit.maxX + 6 { next.append(CGRect(x: hit.maxX, y: hit.minY, width: r.maxX - hit.maxX, height: hit.height)) }
+            }
+            pieces = next
+            if pieces.isEmpty { break }
+        }
+        return pieces.filter { $0.width >= 8 && $0.height >= 6 }
+    }
+
     /// Drifts that show on `frame`, each with the rectangles (minX, minY, maxX, maxY) in front of it that hide it.
     func drifts(in frame: CGRect) -> [(surface: Surface, occluders: [SIMD4<Float>])] {
         (surfaces + sheets.map(\.surface)).compactMap { s in
@@ -812,7 +1003,18 @@ final class SnowWorld {
             switch s.kind {
             case .dock: break
             case .ground: rects = dock.map { [$0] } ?? []
-            case .window, .element: rects = Array(fronts.prefix(max(s.z, 0))) + (dock.map { [$0] } ?? [])
+            case .window:
+                rects = Array(fronts.prefix(max(s.z, 0))) + (dock.map { [$0] } ?? [])
+            case .element:
+                rects = Array(fronts.prefix(max(s.z, 0))) + (dock.map { [$0] } ?? [])
+                if let owner = s.owner {
+                    // Any card/panel body in the same window whose body covers this shelf hides its drift.
+                    let siblingBodies = visibleContentOccluders.compactMap { occ -> CGRect? in
+                        guard occ.isSurfaceBody, occ.window == owner, occ.frame.maxY > CGFloat(s.top) + 2 else { return nil }
+                        return occ.frame
+                    }
+                    rects += siblingBodies
+                }
             }
             let occluders = rects.filter { $0.intersects(box) }
                 .map { SIMD4(Float($0.minX), Float($0.minY), Float($0.maxX), Float($0.maxY)) }
@@ -907,8 +1109,10 @@ extension SnowWorld {
     private static let burstSpeed: Float = 650
     /// Impacts harder than this knock a snowman's balls apart.
     private static let splitSpeed: Float = 170
+    /// Impacts against a wall harder than this break a snowman's balls apart.
+    private static let wallSplitSpeed: Float = 95
     /// Hitting a wall or a snowman harder than this splats a snowball against it.
-    private static let splatSpeed: Float = 280
+    private static let splatSpeed: Float = 240
 
     // MARK: Rolling
 
@@ -968,14 +1172,19 @@ extension SnowWorld {
         }
     }
 
-    /// Fills the bottom of the main screen with snow up to its limit.
+    /// Fills the bottom of every active screen with snow up to its limit.
     func fillFloor() {
-        guard let floor = byKey[-1000] else { return }
-        floor.columns = floor.columns.indices.map { capacity(floor, x: floor.left + (Float($0) + 0.5) * Self.columnWidth) }
+        for i in screens.indices {
+            guard let floor = byKey[-1000 - i] else { continue }
+            floor.columns = floor.columns.indices.map { capacity(floor, x: floor.left + (Float($0) + 0.5) * Self.columnWidth) }
+        }
     }
 
     func buildSnowman() {
-        guard let floor = byKey[-1000] else { return }
+        let screenIdx = pointer.flatMap { p in
+            screens.firstIndex { $0.contains(CGPoint(x: CGFloat(p.x), y: CGFloat(p.y))) }
+        } ?? 0
+        guard let floor = byKey[-1000 - screenIdx] ?? byKey[-1000] else { return }
         let x = Float.random(in: 0.2...0.8) * floor.width
         floor.snowmen.append(Snowman(x: x, ground: floor.height(at: floor.left + x), balls: [24, 16, 11], face: true))
     }
@@ -1150,7 +1359,14 @@ extension SnowWorld {
         }
         b.velocity.y = 0
         b.velocity.x *= max(0, 1 - 1.8 * h)
-        b.position.x += b.velocity.x * h
+        let from = b.position
+        let nextX = from.x + b.velocity.x * h
+        let to = SIMD2(nextX, from.y)
+        if let (normal, fixed) = wall(hitBy: b, from: from, to: to) ?? screenWall(hitBy: b, from: from, to: to) {
+            b.rollingOn = nil
+            return hitHard(&b, normal: normal, at: fixed)
+        }
+        b.position.x = nextX
         guard b.position.x >= s.left, b.position.x < s.right else {
             b.rollingOn = nil
             return true
@@ -1163,9 +1379,6 @@ extension SnowWorld {
             } else {
                 b.velocity.x = -b.velocity.x * 0.3
             }
-        }
-        if let wall = screenWall(b) {
-            b.velocity.x = abs(b.velocity.x) * 0.1 * wall
         }
         guard abs(b.velocity.x) < 12 else { return true }
         s.snowmen.append(Snowman(x: b.position.x - s.left, ground: s.height(at: b.position.x), balls: b.balls,
@@ -1209,10 +1422,10 @@ extension SnowWorld {
         if let (normal, fixed) = wall(hitBy: b, from: from, to: to) {
             return hitHard(&b, normal: normal, at: fixed)
         }
-        b.position = to
-        if let side = screenWall(b) {
-            b.velocity.x = abs(b.velocity.x) * 0.1 * side
+        if let (normal, fixed) = screenWall(hitBy: b, from: from, to: to) {
+            return hitHard(&b, normal: normal, at: fixed)
         }
+        b.position = to
         return true
     }
 
@@ -1224,11 +1437,13 @@ extension SnowWorld {
         b.position = position
         if into > Self.splatSpeed {
             burst(b.balls, base: position, velocity: along * 0.3 + n * 40)
+            powder(at: position + SIMD2(0, b.height * 0.5), velocity: along * 0.25 + n * 35, size: max(b.halfWidth * 0.5, 5))
             return false
         }
         b.velocity = along * 0.5 + n * into * 0.1
-        if b.balls.count > 1, into > Self.splitSpeed {
+        if b.balls.count > 1, into > Self.wallSplitSpeed {
             scatter(b.balls, from: 0, base: position, facesRight: b.facesRight, face: b.face, velocity: b.velocity)
+            powder(at: position + SIMD2(0, b.height * 0.5), velocity: along * 0.2 + n * 25, size: max(b.halfWidth * 0.4, 4))
             return false
         }
         return true
@@ -1280,11 +1495,22 @@ extension SnowWorld {
         return nil
     }
 
-    /// +1 when a piece has run past the left edge of the screens, -1 past the right edge.
-    private func screenWall(_ b: Body) -> Float? {
+    /// Outward normal and stop point when a piece runs into the outer left/right wall or ceiling of the screens.
+    private func screenWall(hitBy b: Body, from: SIMD2<Float>, to: SIMD2<Float>) -> (SIMD2<Float>, SIMD2<Float>)? {
         guard let left = screens.map(\.minX).min(), let right = screens.map(\.maxX).max() else { return nil }
-        if b.position.x - b.halfWidth < Float(left) { return 1 }
-        if b.position.x + b.halfWidth > Float(right) { return -1 }
+        let half = b.halfWidth
+        let tall = b.height
+        if to.x - half < Float(left), b.velocity.x < 0 {
+            return (SIMD2(1, 0), SIMD2(Float(left) + half, to.y))
+        }
+        if to.x + half > Float(right), b.velocity.x > 0 {
+            return (SIMD2(-1, 0), SIMD2(Float(right) - half, to.y))
+        }
+        if b.velocity.y > 0,
+           let screen = screens.first(where: { $0.minX <= CGFloat(to.x) && CGFloat(to.x) <= $0.maxX }) ?? screens.first,
+           to.y + tall > Float(screen.maxY) {
+            return (SIMD2(0, -1), SIMD2(to.x, Float(screen.maxY) - tall))
+        }
         return nil
     }
 
@@ -1292,7 +1518,9 @@ extension SnowWorld {
 
     /// The highest the snow may pile at `x`, the same limit `settle` applies.
     private func capacity(_ s: Surface, x: Float) -> Float {
-        s.cap * (0.45 + 0.55 * heap(s, x: x))
+        ensureProfiles(s)
+        let i = min(max(Int(((x - s.left) / Self.columnWidth).rounded(.down)), 0), s.capacityProfile.count - 1)
+        return s.capacityProfile[i]
     }
 
     private func depth(_ s: Surface, around x: Float) -> Float {
@@ -1322,6 +1550,36 @@ extension SnowWorld {
                   !s.snowmen.contains(where: { abs(s.left + $0.x - x) < $0.balls[0] + 20 }) else { continue }
             s.trees.append(Tree(x: x - s.left, size: min(max(s.cap * 1.5, 14), 34) * .random(in: 0.75...1.15),
                                 grown: 0.01, seed: .random(in: 0...1)))
+        }
+    }
+
+    /// When deep drifts build up on the floor, Dock, or wide windows, snowmen appear organically out of the snow.
+    fileprivate func spawnSnowmen(_ dt: Float) {
+        snowmanClock -= dt
+        guard snowmanClock <= 0 else { return }
+        snowmanClock = 2
+        guard running else { return }
+        for s in surfaces where settles.contains(s.kind) && s.kind != .element {
+            let limit = max(1, Int(s.width / 420))
+            guard s.width >= 120, s.snowmen.count < limit, Float.random(in: 0...1) < 0.30 else { continue }
+            let margin: Float = min(36, s.width * 0.25)
+            let x = s.left + Float.random(in: margin...(s.width - margin))
+            let minDepth: Float = s.kind == .ground ? 15 : 10
+            guard depth(s, around: x) >= max(minDepth, capacity(s, x: x) * 0.78),
+                  isExposed(s, x: x),
+                  !s.snowmen.contains(where: { abs(s.left + $0.x - x) < 140 }),
+                  !s.trees.contains(where: { abs(s.left + $0.x - x) < 40 }) else { continue }
+            let baseRadius: Float = s.kind == .ground ? .random(in: 16...23) : .random(in: 10...14)
+            let balls = [baseRadius, baseRadius * 0.68, baseRadius * 0.46]
+            // Scoop a small dimple beneath the newly formed snowman so it sits nestled in the snowbank.
+            let lo = max(0, Int((x - baseRadius - s.left) / Self.columnWidth))
+            let hi = min(s.columns.count - 1, Int((x + baseRadius - s.left) / Self.columnWidth))
+            if lo <= hi {
+                for j in lo...hi { s.columns[j] *= 0.82 }
+            }
+            let ground = max(0, s.height(at: x) - 1.5)
+            s.snowmen.append(Snowman(x: x - s.left, ground: ground, balls: balls, face: true))
+            powder(at: SIMD2(x, s.top + ground + baseRadius), velocity: SIMD2(wind * 0.15, 25), size: baseRadius * 0.45)
         }
     }
 

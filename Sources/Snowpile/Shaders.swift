@@ -2,7 +2,7 @@ let shaderSource = """
 #include <metal_stdlib>
 using namespace metal;
 
-struct Scene { float2 size; float2 origin; float scale; float time; };
+struct Scene { float2 size; float2 origin; float scale; float time; int occluders; int _pad; };
 struct Sprite { float2 position; float2 velocity; float size; float alpha; float soft; float lump; };
 struct Drift { float2 origin; float columnWidth; int count; float height; int occluders; };
 
@@ -46,7 +46,20 @@ vertex PieceOut pieceVertex(uint id [[vertex_id]], const device Sprite *pieces [
     return out;
 }
 
-fragment float4 pieceFragment(PieceOut in [[stage_in]], float2 coord [[point_coord]]) {
+fragment float4 pieceFragment(PieceOut in [[stage_in]], float2 coord [[point_coord]],
+                             constant Scene &scene [[buffer(0)]], const device float4 *occluders [[buffer(1)]]) {
+    float occluderFade = 1.0;
+    if (scene.occluders > 0) {
+        float2 world = float2(scene.origin.x + in.position.x / scene.scale,
+                              scene.origin.y + scene.size.y - in.position.y / scene.scale);
+        for (int k = 0; k < scene.occluders; k++) {
+            float4 o = occluders[k];
+            float2 d = max(o.xy - world, world - o.zw);
+            float dist = max(d.x, d.y);
+            if (dist <= 0.0) discard_fragment();
+            if (dist < 5.0) occluderFade = min(occluderFade, smoothstep(0.0, 5.0, dist));
+        }
+    }
     float2 centered = coord - 0.5;
     float along = clamp(dot(centered, in.trail) / max(dot(in.trail, in.trail), 0.00001), -0.5, 0.5);
     float2 p = (centered - in.trail * along) * 2.0 / max(in.radius, 0.001);
@@ -60,9 +73,9 @@ fragment float4 pieceFragment(PieceOut in [[stage_in]], float2 coord [[point_coo
         rim = saturate(dot(p, float2(0.5, 0.7)));
     }
     float edge = mix(0.75, 0.15, in.soft);
-    float a = (1.0 - smoothstep(edge, 1.0, r)) * in.alpha;
+    float a = (1.0 - smoothstep(edge, 1.0, r)) * in.alpha * occluderFade;
     // A faint cool halo keeps white flakes readable over white windows; over dark ones it all but vanishes.
-    float halo = (1.0 - smoothstep(0.9, 1.45, r)) * (1.0 - a) * in.alpha * 0.3;
+    float halo = (1.0 - smoothstep(0.9, 1.45, r)) * (1.0 - a) * in.alpha * occluderFade * 0.3;
     if (a + halo < 0.003) discard_fragment();
     float3 snow = float3(0.97, 0.98, 1.0);
     float3 shadow = float3(0.66, 0.72, 0.82);
@@ -91,11 +104,23 @@ vertex DriftOut driftVertex(uint id [[vertex_id]], constant Scene &scene [[buffe
 static float depthAt(const device float *columns, constant Drift &drift, float x) {
     float width = float(drift.count) * drift.columnWidth;
     float t = clamp(x, 0.0, width) / drift.columnWidth - 0.5;
-    int i = clamp(int(floor(t)), 0, drift.count - 1);
-    int j = min(i + 1, drift.count - 1);
-    float h = mix(columns[i], columns[j], smoothstep(0.0, 1.0, saturate(t - floor(t))));
+    int i1 = clamp(int(floor(t)), 0, drift.count - 1);
+    int i0 = max(i1 - 1, 0);
+    int i2 = min(i1 + 1, drift.count - 1);
+    int i3 = min(i1 + 2, drift.count - 1);
+    float f = saturate(t - floor(t));
+    float f2 = f * f;
+    float f3 = f2 * f;
+    float c0 = columns[i0], c1 = columns[i1], c2 = columns[i2], c3 = columns[i3];
+    float h = 0.5 * ((2.0 * c1) + (-c0 + c2) * f + (2.0 * c0 - 5.0 * c1 + 4.0 * c2 - c3) * f2 + (-c0 + 3.0 * c1 - 3.0 * c2 + c3) * f3);
+    h = clamp(h, 0.0, max(max(c1, c2), 0.0) * 1.06);
+    // Smooth pillowed roll-off at open drift ends instead of a vertical cliff.
     float beyond = max(max(-x, x - width), 0.0);
-    return h - beyond * 3.0;
+    if (beyond > 0.0) {
+        float drop = beyond * beyond * 0.9 + beyond * 1.1;
+        h = max(0.0, h - drop);
+    }
+    return h;
 }
 
 fragment float4 driftFragment(DriftOut in [[stage_in]], constant Scene &scene [[buffer(0)]], constant Drift &drift [[buffer(1)]],
@@ -107,27 +132,38 @@ fragment float4 driftFragment(DriftOut in [[stage_in]], constant Scene &scene [[
     }
     float x = in.local.x;
     float y = in.local.y;
-    float h = depthAt(columns, drift, x);
-    if (h < 0.05) discard_fragment();
+    float rawH = depthAt(columns, drift, x);
+    if (rawH < 0.05) discard_fragment();
+    // Subtle natural snow-pillow micro-contour along the crest.
+    float micro = (sin(world.x * 0.23) * 0.5 + sin(world.x * 0.59 + 1.7) * 0.35 + sin(world.x * 1.27) * 0.15) * 0.35 * saturate(rawH / 4.5);
+    float h = max(0.0, rawH + micro);
     float px = 1.0 / scene.scale;
-    float inside = saturate((h - y) / px + 0.5) * saturate((y + 1.0) / px + 0.5) * saturate(h / 0.8);
+    // Gently rounded snow belly hugs the surface edge cleanly without hard pixel steps.
+    float baseSoft = saturate((y + 0.85) / (px * 1.15) + 0.5);
+    float topSoft = saturate((h - y) / (px * 1.2) + 0.5);
+    float inside = topSoft * baseSoft * saturate(h / 0.7);
     // Outline just above the snow and a contact shadow under it, so a drift reads on a white title bar.
-    float outline = saturate(1.0 - abs(y - h - 0.6) / 0.9) * 0.22 * saturate(h / 1.5);
-    float contact = saturate(1.0 - abs(y + 1.6) / 1.4) * 0.3 * saturate(h / 1.5);
+    float outline = saturate(1.0 - abs(y - h - 0.55) / 0.95) * 0.20 * saturate(h / 1.4);
+    float contact = saturate(1.0 - abs(y + 1.45) / 1.5) * 0.32 * saturate(h / 1.2);
     float edgeAlpha = max(outline, contact) * (1.0 - inside);
     if (inside <= 0.0 && edgeAlpha <= 0.003) discard_fragment();
-    if (inside <= 0.0) return float4(float3(0.36, 0.42, 0.54) * edgeAlpha, edgeAlpha);
+    if (inside <= 0.0) return float4(float3(0.30, 0.37, 0.50) * edgeAlpha, edgeAlpha);
 
-    float dh = depthAt(columns, drift, x + 1.5) - depthAt(columns, drift, x - 1.5);
-    float3 normal = normalize(float3(-dh / 3.0, 1.0, 0.6));
-    float lit = saturate(dot(normal, normalize(float3(-0.35, 1.0, 0.8))));
+    float dh = depthAt(columns, drift, x + 2.0) - depthAt(columns, drift, x - 2.0);
+    float3 normal = normalize(float3(-dh / 4.0, 1.0, 0.65));
+    float lit = saturate(dot(normal, normalize(float3(-0.38, 1.0, 0.78))));
     float below = h - y;
-    float occlusion = 1.0 - exp(-max(y + 1.0, 0.0) / 3.0);
-    float3 snow = float3(0.95, 0.965, 0.985);
-    float3 shade = float3(0.70, 0.76, 0.86);
-    float3 color = mix(shade, snow, saturate(0.35 + 0.65 * lit) * mix(0.75, 1.0, occlusion));
-    color = mix(color, float3(1.0), saturate(1.0 - below / 1.2) * 0.35);
-    color *= 1.0 + (hash21(floor(in.position.xy)) - 0.5) * 0.03;
+    float relY = saturate(y / max(h, 0.5));
+    float occlusion = 1.0 - exp(-max(y + 0.9, 0.0) / 3.6);
+    float3 snow = float3(0.97, 0.982, 0.996);
+    float3 shade = float3(0.72, 0.79, 0.90);
+    float3 deepShade = float3(0.62, 0.70, 0.84);
+    float3 baseTint = mix(deepShade, shade, saturate(0.35 + 0.65 * relY));
+    float3 color = mix(baseTint, snow, saturate(0.30 + 0.70 * lit) * mix(0.72, 1.0, occlusion));
+    // Translucent sunlit snow crest rim.
+    float crest = saturate(1.0 - below / 1.8);
+    color = mix(color, float3(1.0), crest * crest * 0.42);
+    color *= 1.0 + (hash21(floor(in.position.xy)) - 0.5) * 0.028;
     float2 cell = floor(in.position.xy / 3.0);
     float glint = hash21(cell + 7.0);
     if (glint > 0.985 && below < 4.0) {

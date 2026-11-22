@@ -6,6 +6,8 @@ struct SceneUniforms {
     var origin: SIMD2<Float>
     var scale: Float
     var time: Float
+    var occluders: Int32 = 0
+    var _pad: Int32 = 0
 }
 
 struct DriftUniforms {
@@ -61,9 +63,17 @@ final class SnowView: MTKView {
     override func mouseUp(with event: NSEvent) { onRelease() }
 }
 
+/// Borderless panel that keeps its exact screen frame on secondary displays instead of letting AppKit clamp it.
+private final class OverlayPanel: NSPanel {
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+}
+
 /// A transparent window over one screen, above the Dock and normal windows, click-through except over snow.
 /// It redraws every display frame only while something moves; a still scene is drawn once per change.
 final class Overlay: NSObject, MTKViewDelegate {
+    private static var lastWorldStep: CFTimeInterval = 0
     let index: Int
     let frame: CGRect
     private let scale: CGFloat
@@ -80,10 +90,9 @@ final class Overlay: NSObject, MTKViewDelegate {
         self.frame = screen.frame
         self.scale = screen.backingScaleFactor
         self.world = world
-        window = NSPanel(contentRect: screen.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        window = OverlayPanel(contentRect: screen.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         window.hidesOnDeactivate = false
         window.becomesKeyOnlyIfNeeded = true
-        window.setFrame(screen.frame, display: false)
         window.level = .statusBar
         window.backgroundColor = .clear
         window.isOpaque = false
@@ -91,6 +100,7 @@ final class Overlay: NSObject, MTKViewDelegate {
         window.ignoresMouseEvents = true
         window.isReleasedWhenClosed = false
         window.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
+        window.setFrame(screen.frame, display: false)
         view = SnowView(frame: CGRect(origin: .zero, size: screen.frame.size), device: SnowGPU.shared.device)
         view.colorPixelFormat = .bgra8Unorm
         view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
@@ -108,6 +118,7 @@ final class Overlay: NSObject, MTKViewDelegate {
         guard active != shown else { return }
         shown = active
         if active {
+            window.setFrame(frame, display: false)
             window.orderFrontRegardless()
             view.isPaused = !animating
             if !animating { view.draw() }
@@ -115,6 +126,13 @@ final class Overlay: NSObject, MTKViewDelegate {
             view.isPaused = true
             window.orderOut(nil)
         }
+    }
+
+    /// Re-asserts window ordering across Spaces, full-screen apps, and display wake.
+    func ensureOnTop() {
+        guard shown else { return }
+        window.setFrame(frame, display: false)
+        window.orderFrontRegardless()
     }
 
     func close() {
@@ -141,8 +159,9 @@ final class Overlay: NSObject, MTKViewDelegate {
 
     func draw(in view: MTKView) {
         let now = CACurrentMediaTime()
-        // Advance once per display frame, shared by every screen's overlay.
-        if index == 0, animating {
+        // Advance from whichever active display draws next so secondary screens keep animating even if display 0 is occluded.
+        if animating, now - Self.lastWorldStep >= 0.012 {
+            Self.lastWorldStep = now
             if let effects, effects.effect != .snow {
                 effects.step(now: now, pointer: NSEvent.mouseLocation)
                 // Let previously accumulated snow thaw while another effect is visible.
@@ -225,10 +244,18 @@ final class Overlay: NSObject, MTKViewDelegate {
 
         let sprites = world.sprites(screen: index, frame: frame)
         if !sprites.isEmpty {
+            let flakeOccluders = world.flakeOccluders(in: frame)
+            var spriteScene = scene
+            spriteScene.occluders = Int32(flakeOccluders.count)
+            var paddedOccluders = flakeOccluders
+            paddedOccluders.append(.zero)
             let buffer = gpu.device.makeBuffer(bytes: sprites, length: sprites.count * MemoryLayout<Sprite>.stride)!
+            let occluderBuffer = gpu.device.makeBuffer(bytes: paddedOccluders, length: paddedOccluders.count * MemoryLayout<SIMD4<Float>>.stride)!
             encoder.setRenderPipelineState(gpu.sprites)
             encoder.setVertexBuffer(buffer, offset: 0, index: 0)
-            encoder.setVertexBytes(&scene, length: sceneLength, index: 1)
+            encoder.setVertexBytes(&spriteScene, length: sceneLength, index: 1)
+            encoder.setFragmentBytes(&spriteScene, length: sceneLength, index: 0)
+            encoder.setFragmentBuffer(occluderBuffer, offset: 0, index: 1)
             encoder.drawPrimitives(type: .point, vertexStart: 0, vertexCount: sprites.count)
         }
 

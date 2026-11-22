@@ -59,6 +59,29 @@ final class SnowWorldTests: XCTestCase {
         XCTAssertGreaterThan(inside.columns.reduce(0, +), 20)
     }
 
+    func testSnowAccumulatesOnCardsAndBubblesInsideAFullScreenWindow() throws {
+        let world = SnowWorld()
+        world.intensity = 1.5
+        world.setScreens([screen])
+        // Stack a URL bar, two bubbles, and a composer in the same vertical column to verify upper ledges do not starve lower ones.
+        let urlBar = (key: 1 << 40 | 10, frame: CGRect(x: 240, y: 740, width: 680, height: 28), window: 9)
+        let topBubble = (key: 1 << 40 | 11, frame: CGRect(x: 300, y: 520, width: 520, height: 70), window: 9)
+        let lowerBubble = (key: 1 << 40 | 12, frame: CGRect(x: 300, y: 320, width: 520, height: 70), window: 9)
+        let composer = (key: 1 << 40 | 13, frame: CGRect(x: 240, y: 40, width: 680, height: 130), window: 9)
+        var now = 1.0
+        while now < 80 {
+            now += 0.05
+            world.updateWindows([(9, screen)], elements: [urlBar, topBubble, lowerBubble, composer], dock: nil, now: now)
+            world.step(now: now)
+        }
+        let topSurface = try XCTUnwrap(world.surfaces.first { $0.key == topBubble.key })
+        let lowerSurface = try XCTUnwrap(world.surfaces.first { $0.key == lowerBubble.key })
+        let composerSurface = try XCTUnwrap(world.surfaces.first { $0.key == composer.key })
+        XCTAssertGreaterThan(topSurface.columns.reduce(0, +), 60)
+        XCTAssertGreaterThan(lowerSurface.columns.reduce(0, +), 40)
+        XCTAssertGreaterThan(composerSurface.columns.reduce(0, +), 60)
+    }
+
     func testDriftsFadeOnceTheSnowStops() throws {
         var (world, now) = snowyWorld()
         let before = try XCTUnwrap(drift(world)).reduce(0, +)
@@ -270,5 +293,119 @@ final class SnowWorldTests: XCTestCase {
         world.step(now: now)
         XCTAssertTrue(world.lumps.count > lumps || !world.sheets.isEmpty)
         XCTAssertLessThan(try XCTUnwrap(drift(world)).reduce(0, +), before)
+    }
+
+    func testSnowAccumulatesAcrossMultipleDisplaysAndRespectsMenuBar() throws {
+        let primary = CGRect(x: 0, y: 0, width: 1200, height: 800)
+        let primaryVisible = CGRect(x: 0, y: 0, width: 1200, height: 770)
+        let secondary = CGRect(x: -1024, y: 105, width: 1024, height: 665)
+        let secondaryVisible = CGRect(x: -1024, y: 105, width: 1024, height: 643)
+        let world = SnowWorld()
+        world.intensity = 2
+        world.setScreens([primary, secondary], visible: [primaryVisible, secondaryVisible])
+        var now = 1.0
+        // Full-bleed maximized windows on both screens
+        world.updateWindows([(10, primary), (11, secondary)], dock: nil, now: now)
+        while now < 45 {
+            now += 0.05
+            world.step(now: now)
+        }
+        let primaryWin = try XCTUnwrap(world.surfaces.first { $0.key == 10 })
+        let secondaryWin = try XCTUnwrap(world.surfaces.first { $0.key == 11 })
+        XCTAssertLessThanOrEqual(primaryWin.top + primaryWin.cap, Float(primary.maxY), "full-screen drift should stay inside screen")
+        XCTAssertLessThanOrEqual(secondaryWin.top + secondaryWin.cap, Float(secondary.maxY))
+        XCTAssertGreaterThan(primaryWin.columns.reduce(0, +), 20)
+        XCTAssertGreaterThan(secondaryWin.columns.reduce(0, +), 20)
+        XCTAssertFalse(world.sprites(screen: 1, frame: secondary).isEmpty, "secondary display must render falling snow")
+    }
+
+    func testMaximizedWindowUnderMenuBarKeepsSnowOnTopBorderRatherThanInsideToolbar() throws {
+        let screen = CGRect(x: 0, y: 0, width: 1024, height: 768)
+        let visible = CGRect(x: 0, y: 0, width: 1024, height: 744)
+        let world = SnowWorld()
+        world.setScreens([screen], visible: [visible])
+        world.updateWindows([(1, CGRect(x: 0, y: 0, width: 1024, height: 744))], dock: nil, now: 1)
+        let win = try XCTUnwrap(world.surfaces.first { $0.key == 1 })
+        XCTAssertEqual(win.top, 744, "snow should rest on the window's actual top edge, not drop into its toolbar")
+    }
+
+    func testTallCardBlocksFlakesAndContentOccludersStayClippedBehindFrontWindows() throws {
+        let world = SnowWorld()
+        world.intensity = 2.5
+        world.windBase = 0
+        world.windStrength = 0
+        world.setScreens([screen])
+        let tallCard = CGRect(x: 800, y: 260, width: 300, height: 390)
+        let textBlock = CGRect(x: 200, y: 250, width: 450, height: 350)
+        let frontWin = CGRect(x: 150, y: 200, width: 300, height: 420)
+        let occluders = [
+            ElementLocator.ContentOccluder(frame: CGRect(x: tallCard.minX, y: tallCard.minY, width: tallCard.width, height: tallCard.height - 2), window: 9, isSurfaceBody: true),
+            ElementLocator.ContentOccluder(frame: textBlock, window: 9, isSurfaceBody: false),
+        ]
+        var now = 1.0
+        world.updateWindows([(1, frontWin), (9, screen)],
+                            elements: [(key: 1 << 40 | 42, frame: tallCard, window: 9)],
+                            occluders: occluders, dock: nil, now: now)
+        // The portion of textBlock hidden behind frontWin (x=200..450) must be subtracted so frontWin is not masked.
+        let gpuOccluders = world.flakeOccluders(in: screen)
+        XCTAssertTrue(gpuOccluders.contains { $0.x >= 799 && $0.z <= 1101 }, "tall card must be passed to sprite shader")
+        XCTAssertFalse(gpuOccluders.contains { $0.x < 445 && $0.y >= 240 && $0.w <= 610 }, "hidden text behind frontWin must be clipped")
+        XCTAssertTrue(gpuOccluders.contains { $0.x >= 449 && $0.z <= 651 }, "exposed portion of text block must remain occluded")
+
+        while now < 30 {
+            now += 0.05
+            world.step(now: now)
+        }
+        let cardSurface = try XCTUnwrap(world.surfaces.first { $0.key == (1 << 40 | 42) })
+        XCTAssertGreaterThan(cardSurface.columns.reduce(0, +), 25, "snow must still settle on top of the tall card")
+        // No live flake should reside deep inside the tall card body.
+        let insideCard = world.sprites(screen: 0, frame: screen).filter {
+            $0.lump == 0 && $0.position.x > Float(tallCard.minX + 10) && $0.position.x < Float(tallCard.maxX - 10)
+                && $0.position.y > Float(tallCard.minY + 10) && $0.position.y < Float(tallCard.maxY - 12)
+        }
+        XCTAssertTrue(insideCard.isEmpty, "flakes must not pass through a tall floating card")
+    }
+
+    func testSnowmenShatterAgainstScreenWalls() throws {
+        var (world, floor, now) = try floorWithSnowmen(at: [180])
+        let grip = CGPoint(x: 180, y: 40)
+        world.grab(at: grip)
+        var p = grip
+        // Throw hard to the left into the left screen wall.
+        for _ in 0..<8 {
+            now += 1.0 / 60
+            p.x -= 18
+            p.y += 6
+            world.step(now: now, pointer: p)
+        }
+        world.letGo()
+        var brokeApart = false
+        for _ in 0..<120 {
+            now += 1.0 / 60
+            world.step(now: now, pointer: CGPoint(x: 900, y: 700))
+            if world.bodies.count > 1 || !world.lumps.isEmpty { brokeApart = true }
+        }
+        XCTAssertTrue(brokeApart, "a snowman thrown into a screen edge must break apart or burst")
+        XCTAssertFalse(floor.snowmen.contains { $0.balls.count == 3 }, "snowman should not survive wall impact intact")
+    }
+
+    func testSnowmenSpawnNaturallyInDeepSnow() throws {
+        let (world, floor, start) = try floorWithSnowmen(at: [])
+        var now = start
+        floor.columns = Array(repeating: 28, count: floor.columns.count)
+        for _ in 0..<(60 * 35) {
+            now += 1.0 / 60
+            world.step(now: now)
+        }
+        XCTAssertFalse(floor.snowmen.isEmpty, "deep snow should naturally spawn at least one snowman")
+        XCTAssertTrue(floor.snowmen.allSatisfy { $0.balls.count == 3 && $0.face })
+    }
+
+    func testDriftsTaperSmoothlyAtOpenWindowEnds() throws {
+        let (world, _) = snowyWorld()
+        let cols = try XCTUnwrap(drift(world))
+        let mid = cols[cols.count / 4 ..< (cols.count * 3) / 4].reduce(0, +) / Float(cols.count / 2)
+        XCTAssertLessThan(cols.first ?? 99, mid * 0.7, "left end of a window drift should taper smoothly")
+        XCTAssertLessThan(cols.last ?? 99, mid * 0.7, "right end of a window drift should taper smoothly")
     }
 }

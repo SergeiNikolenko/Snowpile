@@ -173,7 +173,10 @@ final class EffectWorld {
                         if running { p.age = min(p.age, p.life - 2) }
                     } else if p.restingOn == nil {
                         let tangent = SIMD2(-away.y, away.x) / distance
-                        p.velocity += (away / distance * 90 + tangent * 100 + cursorVelocity * 0.15) * near * dt
+                        let pushOut = (away / distance) * 90
+                        let swirl = tangent * 100
+                        let drag = cursorVelocity * 0.15
+                        p.velocity += (pushOut + swirl + drag) * (near * dt)
                     }
                 }
             }

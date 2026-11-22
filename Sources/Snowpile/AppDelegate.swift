@@ -23,7 +23,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastSpaceChange: CFTimeInterval = 0
     private var lastDigest = 0
     private var lastStillDraw: CFTimeInterval = 0
+    private var interactionMonitor: Any?
     private lazy var pauseItem = item("Pause Snow", #selector(togglePause))
+    private lazy var pauseStatusItem: NSMenuItem = {
+        let entry = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        entry.isEnabled = false
+        entry.isHidden = true
+        return entry
+    }()
+    private lazy var pauseIndefinitelySeparator = NSMenuItem.separator()
+    private lazy var pauseIndefinitelyItem = item("Indefinitely", #selector(pauseIndefinitely))
+    private lazy var pauseForItem: NSMenuItem = {
+        let menu = NSMenu()
+        for duration in PauseDuration.allCases {
+            if duration == .untilTomorrow { menu.addItem(.separator()) }
+            let entry = item(duration.title, #selector(pauseForDuration(_:)))
+            entry.representedObject = duration.rawValue
+            menu.addItem(entry)
+        }
+        menu.addItem(pauseIndefinitelySeparator)
+        menu.addItem(pauseIndefinitelyItem)
+        let entry = NSMenuItem(title: "Pause For", action: nil, keyEquivalent: "")
+        entry.submenu = menu
+        return entry
+    }()
     private lazy var shakeItem = item("Shake Off Snow", #selector(shakeOff))
     private lazy var effectItem: NSMenuItem = {
         let menu = NSMenu()
@@ -59,6 +82,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         menu.addItem(pauseItem)
+        menu.addItem(pauseStatusItem)
+        menu.addItem(pauseForItem)
         menu.addItem(effectItem)
         menu.addItem(shakeItem)
         menu.addItem(item("Build a Snowman", #selector(buildSnowman)))
@@ -74,6 +99,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rebuildOverlays()
         NotificationCenter.default.addObserver(self, selector: #selector(rebuildOverlays),
                                                name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(didWake),
+                                                          name: NSWorkspace.didWakeNotification, object: nil)
+        interactionMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.scrollWheel, .leftMouseUp]) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.world.running, self.world.settles.contains(.element) else { return }
+                self.elements.noteInteraction(now: CACurrentMediaTime())
+            }
+        }
         let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.poll() } }
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
@@ -89,7 +122,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        preferences.resumeIfPauseExpired()
         pauseItem.title = preferences.snowing ? "Pause Effects" : "Resume Effects"
+        if let summary = preferences.pauseStatusSummary() {
+            pauseStatusItem.title = summary
+            pauseStatusItem.isHidden = false
+            pauseIndefinitelySeparator.isHidden = false
+            pauseIndefinitelyItem.isHidden = false
+            statusItem.button?.toolTip = "Snowpile — \(summary)"
+        } else {
+            pauseStatusItem.isHidden = true
+            pauseIndefinitelySeparator.isHidden = true
+            pauseIndefinitelyItem.isHidden = true
+        }
         shakeItem.isHidden = activeEffect != .snow
         for entry in effectItem.submenu?.items ?? [] {
             entry.state = entry.representedObject as? String == preferences.selection ? .on : .off
@@ -103,6 +148,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private var shownScreens: [String] = []
+    private var shownScreenFrames: [CGRect] = []
+    private var shownScreenScales: [CGFloat] = []
     private var screens: [NSScreen] = []
 
     private var activeEffect: Effect {
@@ -155,16 +202,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             preferences.onFloor ? .ground : nil,
         ].compactMap { $0 })
         statusItem.button?.appearsDisabled = !preferences.snowing
-        if preferences.screens().map(Preferences.id(of:)) != shownScreens { rebuildOverlays() }
+        if preferences.snowing {
+            statusItem.button?.toolTip = "Snowpile"
+        } else if let summary = preferences.pauseStatusSummary() {
+            statusItem.button?.toolTip = "Snowpile — \(summary)"
+        } else {
+            statusItem.button?.toolTip = "Snowpile — Paused"
+        }
+        syncScreensIfNeeded()
         poll()
+    }
+
+    @discardableResult
+    private func syncScreensIfNeeded() -> Bool {
+        let desired = preferences.screens()
+        let ids = desired.map(Preferences.id(of:))
+        let frames = desired.map(\.frame)
+        let scales = desired.map(\.backingScaleFactor)
+        guard ids != shownScreens || frames != shownScreenFrames || scales != shownScreenScales else { return false }
+        rebuildOverlays()
+        return true
     }
 
     @objc private func rebuildOverlays() {
         screens = preferences.screens()
         shownScreens = screens.map(Preferences.id(of:))
+        shownScreenFrames = screens.map(\.frame)
+        shownScreenScales = screens.map(\.backingScaleFactor)
         overlays.forEach { $0.close() }
         overlays = screens.enumerated().map { Overlay(screen: $1, index: $0, world: world, effects: effects) }
-        world.setScreens(screens.map(\.frame))
+        world.setScreens(screens.map(\.frame), visible: screens.map(\.visibleFrame))
         effects.setScreens(screens.map(\.frame))
         poll()
     }
@@ -173,29 +240,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// has just moved, and a few times a second otherwise. A still scene that only fades or thaws is redrawn
     /// a few times a second; one whose windows just moved, at every poll.
     private func poll() {
+        if preferences.pausedUntil != nil, preferences.resumeIfPauseExpired() {
+            return
+        }
+        ticks += 1
+        if ticks % 30 == 0, syncScreensIfNeeded() {
+            return
+        }
         let snow = activeEffect == .snow
         if snow ? world.isIdle : effects.isIdle {
             overlays.forEach { $0.setActive(false) }
             return
         }
         let now = CACurrentMediaTime()
-        ticks += 1
         let spaces = SpaceReader.current(for: screens)
         let switched = spaces != lastSpaces
-        if switched { lastSpaceChange = now; effects.spaceChanged() }
+        if switched {
+            lastSpaceChange = now
+            effects.spaceChanged()
+            overlays.forEach { $0.ensureOnTop() }
+        }
         lastSpaces = spaces
         world.setSpaces(spaces)
         if ticks % 10 == 0 { dockFrame = DockLocator.frame() }
         if switched || NSEvent.pressedMouseButtons != 0 || now - lastWindowChange < 1 || ticks % 5 == 0 {
-            if snow && world.settles.contains(.element) { elements.refresh(now: now) }
-            let windows = WindowList.current()
+            let ownedWindows = WindowList.currentWithOwners()
+            let windows = ownedWindows.map { (key: $0.key, frame: $0.frame) }
+            if snow && world.settles.contains(.element) {
+                elements.refresh(now: now, visiblePIDs: ownedWindows.map(\.pid))
+            }
             let frames = windows.map(\.frame)
             if frames != lastFrames {
                 lastFrames = frames
                 lastWindowChange = now
             }
             let departing = departures.departing(visible: windows, switched: now - lastSpaceChange < 1, now: now)
-            world.updateWindows(windows, elements: elements.elements(in: windows), dock: dockFrame, now: now, departing: departing)
+            let elementScene = elements.scene(in: windows)
+            world.updateWindows(windows, elements: elementScene.elements, occluders: elementScene.occluders,
+                                dock: dockFrame, now: now, departing: departing)
             effects.updateWindows(windows, dock: dockFrame)
         }
         if !snow {
@@ -227,7 +309,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func togglePause() {
-        preferences.snowing.toggle()
+        if preferences.snowing {
+            preferences.pauseIndefinitely()
+        } else {
+            preferences.resume()
+        }
+    }
+
+    @objc private func pauseForDuration(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let duration = PauseDuration(rawValue: raw) else { return }
+        preferences.pause(for: duration)
+    }
+
+    @objc private func pauseIndefinitely() {
+        preferences.pauseIndefinitely()
+    }
+
+    @objc private func didWake() {
+        preferences.resumeIfPauseExpired()
+        if !syncScreensIfNeeded() {
+            overlays.forEach { $0.ensureOnTop() }
+            poll()
+        }
     }
 
     @objc private func buildSnowman() {
@@ -264,6 +368,11 @@ enum WindowList {
 
     /// Normal on-screen windows and then the desktop widgets behind them, front to back, in Cocoa coordinates.
     static func current() -> [(key: Int, frame: CGRect)] {
+        currentWithOwners().map { ($0.key, $0.frame) }
+    }
+
+    /// Normal on-screen windows (with owner PIDs) and desktop widgets, front to back, in Cocoa coordinates.
+    static func currentWithOwners() -> [(key: Int, frame: CGRect, pid: pid_t)] {
         guard let primary = NSScreen.screens.first,
               let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]]
         else { return [] }
@@ -273,10 +382,13 @@ enum WindowList {
         }
         return info.compactMap { w in
             let layer = w[kCGWindowLayer as String] as? Int
+            let ownerPID = (w[kCGWindowOwnerPID as String] as? Int).map(pid_t.init)
+            let name = w[kCGWindowName as String] as? String ?? ""
             // Desktop widgets are named windows of Notification Center sitting below the normal windows.
-            let widget = layer.map { $0 < 0 } == true && (w[kCGWindowOwnerPID as String] as? Int).map(pid_t.init) == widgetHost
-                && !(w[kCGWindowName as String] as? String ?? "").isEmpty
+            let widget = layer.map { $0 < 0 } == true && ownerPID == widgetHost && !name.isEmpty
+            let app = !widget ? ownerPID.flatMap(NSRunningApplication.init(processIdentifier:)) : nil
             guard layer == 0 || widget,
+                  shouldInclude(widget: widget, windowName: name, activationPolicy: app?.activationPolicy, hasBundleIdentifier: app?.bundleIdentifier != nil),
                   (w[kCGWindowAlpha as String] as? Double ?? 1) > 0.05,
                   let number = w[kCGWindowNumber as String] as? Int,
                   let bounds = w[kCGWindowBounds as String] as? NSDictionary,
@@ -285,8 +397,17 @@ enum WindowList {
             else { return nil }
             let frame = CGRect(x: b.minX, y: height - b.maxY, width: b.width, height: b.height)
             // Widget corners are much rounder than a window's.
-            return (number, widget ? frame.insetBy(dx: 12, dy: 0) : frame)
+            return (number, widget ? frame.insetBy(dx: 12, dy: 0) : frame, ownerPID ?? 0)
         }
+    }
+
+    /// Ignores invisible background helper windows (such as CLI drivers with no bundle ID or title) so they never occlude real windows.
+    static func shouldInclude(widget: Bool, windowName: String, activationPolicy: NSApplication.ActivationPolicy?, hasBundleIdentifier: Bool) -> Bool {
+        if widget { return true }
+        guard let policy = activationPolicy else { return !windowName.isEmpty }
+        if policy == .prohibited { return false }
+        if policy != .regular && !hasBundleIdentifier && windowName.isEmpty { return false }
+        return true
     }
 }
 
